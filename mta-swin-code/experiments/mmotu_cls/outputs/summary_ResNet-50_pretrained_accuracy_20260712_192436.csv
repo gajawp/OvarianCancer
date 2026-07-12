@@ -1,0 +1,2 @@
+Model,Seed,Selection Metric,Class Weights,Accuracy (%),Balanced Accuracy (%),Macro F1 (%),Macro Precision (%),Macro Sensitivity (%),Macro Specificity (%),MCC,ROC-AUC (%),Parameters,Misclassified (n/total)
+ResNet-50 (pretrained),42,accuracy,False,66.525,56.083,57.309,61.791,56.083,94.937,0.5931,86.994,23524424,157/469
