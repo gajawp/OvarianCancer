@@ -9,7 +9,9 @@ __pycache__/
 *.pt
 
 # Experiment outputs
-mta-swin-code/experiments/*/outputs/
+# NOTE: experiment result artifacts (CSVs, plots) under outputs/ ARE tracked.
+# Only weight files are excluded, via the *.pth / *.pt rules above (this keeps
+# outputs/checkpoints/*.pt untracked while tracking metrics and figures).
 mta-swin-code/experiments/*/mta_seed_runs/
 mta-swin-code/experiments/*/checkpoints/
 mta-swin-code/experiments/*/plots/
