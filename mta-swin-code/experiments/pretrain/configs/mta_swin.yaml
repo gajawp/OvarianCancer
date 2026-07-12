@@ -1,0 +1,70 @@
+# Basic settings
+seed: 42
+output_dir: "outputs"
+
+# Model configuration
+model:
+  name: "mta_swin_tiny"
+  num_classes: 1000
+  drop_path_rate: 0.2
+  # MTA-specific parameters
+  mta_stages: [0, 1]
+  cq: 6                         # Query convolution kernel size
+  ck: 11                        # Key convolution kernel size  
+  ch: 2                         # Head convolution kernel size
+  label_smoothing: 0.1          # Label smoothing
+
+# Data configuration
+data:
+  data_dir: "/projects/insightx-lab/imagenet-1k"
+  batch_size: 1024              # 1024
+  num_workers: 8             
+  img_size: 224
+  pin_memory: true
+
+# Augmentation configuration
+aug:
+  mixup: 0.8                    # Mixup alpha
+  cutmix: 1.0                   # CutMix alpha
+  mixup_prob: 1.0               # Probability of applying mixup/cutmix
+  mixup_switch_prob: 0.5        # Probability of switching between mixup and cutmix
+  mixup_mode: "batch"           # Apply mixup per batch
+
+# Training configuration
+epochs: 300
+grad_clip: 5.0
+print_freq: 50                
+save_freq: 20
+
+# Optimizer settings for batch size 2048
+optimizer:
+  name: "adamw"
+  lr: 1.e-3                  
+  weight_decay: 0.05       
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# Learning rate scheduler
+scheduler:
+  name: "cosine"                
+  min_lr: 1.0e-5                
+  warmup_epochs: 20
+  warmup_lr_init: 1.0e-6
+
+# Early stopping
+early_stopping:
+  enabled: false                
+  patience: 30                  
+  min_delta: 0.001
+  mode: "max"
+  restore_best_weights: true
+
+# Logging
+tensorboard: true
+
+# Performance optimizations
+performance:
+  amp: true                     # Enable automatic mixed precision
+  amp_dtype: "bf16"             # Use bfloat16 (more stable than fp16 on H200)
+  cudnn_benchmark: true         
+  gradient_checkpointing: false # Enable if memory becomes tight

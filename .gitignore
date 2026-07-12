@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Model checkpoints / large weights (tracked out of band, see READMEs)
+*.pth
+*.pt
+
+# Experiment outputs
+mta-swin-code/experiments/*/outputs/
+mta-swin-code/experiments/*/mta_seed_runs/
+mta-swin-code/experiments/*/checkpoints/
+mta-swin-code/experiments/*/plots/
+mta-swin-code/experiments/*/final_tables/
+mta-swin-code/experiments/*/external/
+qualitative_results/
+
+# OS
+.DS_Store
