@@ -8,14 +8,17 @@ Split: train_cls.txt is the training pool -> stratified 80/20 into train/val
        (seed 42) for early stopping / LR scheduling; val_cls.txt is the fixed
        held-out test set (this is the paper's official 1000/469 split).
 
-Single model only: MTA-Swin pretrained. Run:
+Model: MTA-Swin (pretrained) by default; --model / --mode select any of the
+comparison baselines (ResNet-50, Swin-T, ...) for pipeline sanity checks. Run:
     python experiments/mmotu_cls/run_mmotu_mta_swin.py
+    python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50
 """
 
 from __future__ import annotations
 
 import argparse
 import random
+import re
 import sys
 import time
 from contextlib import nullcontext
@@ -30,6 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import timm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -44,7 +48,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
+from torchvision import models, transforms
 
 from config import CLASS_NAMES, DEFAULT_CONFIG, MMOTUConfig, MTA_ROOT, PRETRAINED_WEIGHTS_ENV_VAR
 
@@ -96,7 +100,7 @@ class MTASwinModel(nn.Module):
     """MTA-Swin-Tiny built with the pretraining config, then head-swapped to
     num_classes. Loads ImageNet-1K weights (head stripped)."""
 
-    def __init__(self, config: MMOTUConfig):
+    def __init__(self, config: MMOTUConfig, pretrained: bool = True):
         super().__init__()
 
         self.model = create_model(
@@ -112,53 +116,139 @@ class MTASwinModel(nn.Module):
             drop_path_rate=config.mta_drop_path_rate,
         )
 
-        if not config.pretrained_weights_path.exists():
-            raise FileNotFoundError(
-                "MTA-Swin pretrained weights were requested but not found at "
-                f"{config.pretrained_weights_path}. Set {PRETRAINED_WEIGHTS_ENV_VAR} "
-                "or drop best_model.pth into the mta-swin-code root."
-            )
+        if pretrained:
+            if not config.pretrained_weights_path.exists():
+                raise FileNotFoundError(
+                    "MTA-Swin pretrained weights were requested but not found at "
+                    f"{config.pretrained_weights_path}. Set {PRETRAINED_WEIGHTS_ENV_VAR} "
+                    "or drop best_model.pth into the mta-swin-code root."
+                )
 
-        checkpoint = torch.load(config.pretrained_weights_path, map_location="cpu")
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-        elif isinstance(checkpoint, dict) and "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
+            checkpoint = torch.load(config.pretrained_weights_path, map_location="cpu")
+            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            elif isinstance(checkpoint, dict) and "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            else:
+                state_dict = checkpoint
 
-        if any(key.startswith("module.") for key in state_dict.keys()):
-            state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
+            if any(key.startswith("module.") for key in state_dict.keys()):
+                state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
 
-        filtered_state_dict = {
-            key: value for key, value in state_dict.items() if not key.startswith("head.")
-        }
-        incompatible = self.model.load_state_dict(filtered_state_dict, strict=False)
+            filtered_state_dict = {
+                key: value for key, value in state_dict.items() if not key.startswith("head.")
+            }
+            incompatible = self.model.load_state_dict(filtered_state_dict, strict=False)
 
-        # strict=False can silently skip everything on an arch mismatch, so
-        # surface the load result explicitly. A tensor from the checkpoint is
-        # "matched" if it is not reported as unexpected; head.* keys are the
-        # only ones expected to be missing (we stripped them and re-init below).
-        matched = len(filtered_state_dict) - len(incompatible.unexpected_keys)
-        print(f"Loaded pretrained weights from: {config.pretrained_weights_path}")
-        print(
-            f"  matched tensors: {matched}/{len(filtered_state_dict)} | "
-            f"missing: {len(incompatible.missing_keys)} | unexpected: {len(incompatible.unexpected_keys)}"
-        )
-        non_head_missing = [k for k in incompatible.missing_keys if not k.startswith("head.")]
-        if non_head_missing:
+            # strict=False can silently skip everything on an arch mismatch, so
+            # surface the load result explicitly. A tensor from the checkpoint is
+            # "matched" if it is not reported as unexpected; head.* keys are the
+            # only ones expected to be missing (we stripped them and re-init below).
+            matched = len(filtered_state_dict) - len(incompatible.unexpected_keys)
+            print(f"Loaded pretrained weights from: {config.pretrained_weights_path}")
             print(
-                f"  [WARNING] {len(non_head_missing)} non-head weights did NOT load "
-                "-- check that the checkpoint matches the MTA config. e.g.:"
+                f"  matched tensors: {matched}/{len(filtered_state_dict)} | "
+                f"missing: {len(incompatible.missing_keys)} | unexpected: {len(incompatible.unexpected_keys)}"
             )
-            for k in non_head_missing[:5]:
-                print(f"    missing: {k}")
+            non_head_missing = [k for k in incompatible.missing_keys if not k.startswith("head.")]
+            if non_head_missing:
+                print(
+                    f"  [WARNING] {len(non_head_missing)} non-head weights did NOT load "
+                    "-- check that the checkpoint matches the MTA config. e.g.:"
+                )
+                for k in non_head_missing[:5]:
+                    print(f"    missing: {k}")
 
         in_features = self.model.head.in_features
         self.model.head = nn.Linear(in_features, config.num_classes)
 
     def forward(self, x):
         return self.model(x)
+
+
+def sanitize_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+
+
+class CustomCNN(nn.Module):
+    """Simple CNN baseline from the comparison experiment."""
+
+    def __init__(self, num_classes: int, dropout_rate: float = 0.5):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 128, 7, stride=2, padding=3), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.Conv2d(128, 256, 5, stride=1, padding=2), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            nn.Conv2d(256, 512, 3, stride=1, padding=1), nn.BatchNorm2d(512), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, stride=2),
+            nn.Conv2d(512, 512, 3, stride=1, padding=1), nn.BatchNorm2d(512), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, stride=2),
+            nn.Conv2d(512, 1024, 3, stride=1, padding=1), nn.BatchNorm2d(1024), nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(), nn.Linear(1024, 2048), nn.ReLU(inplace=True), nn.Dropout(dropout_rate),
+            nn.Linear(2048, 512), nn.ReLU(inplace=True), nn.Dropout(dropout_rate),
+            nn.Linear(512, num_classes),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+def create_torchvision_model(model_name: str, num_classes: int, pretrained: bool):
+    """Build a comparison-baseline model (torchvision or timm) with a fresh head."""
+    if model_name == "ResNet-50":
+        model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT if pretrained else None)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        return model
+    if model_name == "EfficientNet-B4":
+        model = models.efficientnet_b4(weights=models.EfficientNet_B4_Weights.DEFAULT if pretrained else None)
+        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+        return model
+    if model_name == "ConvNeXt-T":
+        model = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None)
+        model.classifier[2] = nn.Linear(model.classifier[2].in_features, num_classes)
+        return model
+    if model_name == "Swin-T":
+        model = models.swin_t(weights=models.Swin_T_Weights.DEFAULT if pretrained else None)
+        model.head = nn.Linear(model.head.in_features, num_classes)
+        return model
+    if model_name == "DeiT-S/16":
+        return timm.create_model("deit_small_patch16_224", pretrained=pretrained, num_classes=num_classes)
+    if model_name == "ViT-S/16":
+        return timm.create_model("vit_small_patch16_224", pretrained=pretrained, num_classes=num_classes)
+
+    timm_ids = {
+        "mamba": "mambaout_tiny.in1k",
+        "maxvit": "maxvit_tiny_rw_224.sw_in1k",
+        "davit": "davit_tiny.msft_in1k",
+        "cait": "cait_s24_224.fb_dist_in1k",
+        "inceptionnext": "inception_next_tiny.sail_in1k",
+        "swinv2": "swinv2_cr_tiny_ns_224.sw_in1k",
+    }
+    key = model_name.lower()
+    if key in timm_ids:
+        return timm.create_model(timm_ids[key], pretrained=pretrained, num_classes=num_classes)
+    raise ValueError(f"Unknown model name: {model_name}")
+
+
+# Comparison model names accepted by --model (MTA-Swin is the default).
+AVAILABLE_MODELS = (
+    "MTA-Swin", "ResNet-50", "EfficientNet-B4", "ConvNeXt-T", "Swin-T",
+    "DeiT-S/16", "ViT-S/16", "mamba", "maxvit", "davit", "cait",
+    "inceptionnext", "swinv2", "Custom CNN",
+)
+
+
+def build_model(model_name: str, mode: str, config: MMOTUConfig) -> nn.Module:
+    pretrained = mode == "pretrained"
+    if model_name == "MTA-Swin":
+        return MTASwinModel(config, pretrained=pretrained)
+    if model_name == "Custom CNN":
+        return CustomCNN(num_classes=config.num_classes)  # always from scratch
+    return create_torchvision_model(model_name, config.num_classes, pretrained=pretrained)
 
 
 def read_cls_dataframe(cls_path: Path, image_dir: Path) -> pd.DataFrame:
@@ -417,6 +507,18 @@ def main():
     parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (default: config).")
     parser.add_argument("--no-plots", action="store_true", help="Skip saving training curves / confusion matrix.")
     parser.add_argument(
+        "--model",
+        choices=AVAILABLE_MODELS,
+        default="MTA-Swin",
+        help="Which comparison model to train (default: MTA-Swin).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["pretrained", "scratch"],
+        default="pretrained",
+        help="Use ImageNet-pretrained weights or train from scratch (default: pretrained).",
+    )
+    parser.add_argument(
         "--selection-metric",
         choices=["accuracy", "macro_f1", "balanced_accuracy"],
         default=None,
@@ -440,14 +542,19 @@ def main():
     # Resolve imbalance-handling switches (CLI overrides config; --balanced is a shortcut).
     selection_metric = args.selection_metric or ("macro_f1" if args.balanced else config.selection_metric)
     use_class_weights = args.class_weights or args.balanced or config.use_class_weights
-    run_tag = selection_metric + ("_cw" if use_class_weights else "")
+    run_tag = (
+        f"{sanitize_name(args.model)}_{args.mode}_{selection_metric}" + ("_cw" if use_class_weights else "")
+    )
+    model_display = f"{args.model} ({args.mode})"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Model:            {model_display}")
     print(f"Image dir:        {config.image_dir}")
     print(f"Train cls file:   {config.train_cls_path}")
     print(f"Val (test) cls:   {config.val_cls_path}")
-    print(f"Pretrained wts:   {config.pretrained_weights_path}")
+    if args.model == "MTA-Swin" and args.mode == "pretrained":
+        print(f"Pretrained wts:   {config.pretrained_weights_path}")
     print(f"Seed:             {config.seed}")
     print(f"Selection metric: {selection_metric}")
     print(f"Class weights:    {use_class_weights}")
@@ -483,7 +590,7 @@ def main():
 
     # ---- model ----
     set_all_seeds(config.seed)
-    model = MTASwinModel(config).to(device)
+    model = build_model(args.model, args.mode, config).to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}\n")
 
@@ -559,7 +666,7 @@ def main():
         roc_auc = float("nan")
 
     print("\n" + "=" * 60)
-    print("TEST RESULTS (MTA-Swin pretrained, MMOTU OTU_2d, 8-class)")
+    print(f"TEST RESULTS ({model_display}, MMOTU OTU_2d, 8-class)")
     print("=" * 60)
     print(f"Accuracy           : {summary['accuracy'] * 100:.2f}%")
     print(f"Balanced Accuracy  : {bal_acc * 100:.2f}%")
@@ -578,7 +685,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     summary_row = {
-        "Model": "MTA-Swin (pretrained)",
+        "Model": model_display,
         "Seed": config.seed,
         "Selection Metric": selection_metric,
         "Class Weights": use_class_weights,
@@ -600,12 +707,12 @@ def main():
     if not args.no_plots:
         save_training_curves(
             train_losses, val_losses, train_accs, val_accs,
-            title=f"MTA-Swin (pretrained) - MMOTU OTU_2d [{run_tag}]",
+            title=f"{model_display} - MMOTU OTU_2d [{run_tag}]",
             output_path=config.plot_dir / f"training_curves_{run_tag}_{timestamp}.png",
         )
         save_confusion_matrix(
             cm, list(CLASS_NAMES),
-            title=f"Confusion Matrix - MTA-Swin (pretrained) - MMOTU OTU_2d [{run_tag}]",
+            title=f"Confusion Matrix - {model_display} - MMOTU OTU_2d [{run_tag}]",
             output_path=config.plot_dir / f"confusion_matrix_{run_tag}_{timestamp}.png",
         )
         print(f"Saved plots to {config.plot_dir}")

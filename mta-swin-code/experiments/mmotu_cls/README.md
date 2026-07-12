@@ -58,6 +58,24 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py
 # quick smoke test:  python experiments/mmotu_cls/run_mmotu_mta_swin.py --epochs 2
 ```
 
+### Other comparison baselines (sanity check)
+
+The same pipeline can train any comparison-baseline model via `--model` /
+`--mode`, useful to confirm the data/eval path behaves on non-MTA models:
+
+```bash
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50   # torchvision, pretrained
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model Swin-T      # closest ref to MTA-Swin
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50 --mode scratch
+```
+
+Accepted `--model`: `MTA-Swin` (default), `ResNet-50`, `EfficientNet-B4`,
+`ConvNeXt-T`, `Swin-T`, `DeiT-S/16`, `ViT-S/16`, `mamba`, `maxvit`, `davit`,
+`cait`, `inceptionnext`, `swinv2`, `Custom CNN`. `--mode {pretrained,scratch}`
+(default `pretrained`). Pretrained weights for these are downloaded on first
+use (torchvision / timm) — needs internet or a warm cache on the server.
+Each run's outputs/checkpoint are tagged `<model>_<mode>_<selection><_cw>`.
+
 ### Imbalance handling (optional)
 
 Defaults reproduce the original run (accuracy-based early stopping, no class
