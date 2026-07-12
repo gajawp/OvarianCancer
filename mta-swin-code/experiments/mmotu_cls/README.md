@@ -98,6 +98,27 @@ output filenames and checkpoint, so runs don't overwrite each other and are easy
 to compare. The summary CSV records the selection metric and whether class
 weights were used.
 
+### Experiment variants (val fraction / focal loss / no-val)
+
+```bash
+# 1) smaller validation split (more data for training)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --val-split 0.05
+
+# 2) focal loss (better for imbalance than plain weighting); combine with weights via --class-weights
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --loss focal --focal-gamma 2.0
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --loss focal --class-weights
+
+# 3) paper-style: no validation set, train on the full pool for a FIXED number of
+#    epochs (cosine LR, no early stopping), evaluate the final model.
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 50
+```
+
+Notes: `--no-val` ignores `--selection-metric` / `--val-split` and always trains
+exactly `--epochs` epochs, so set `--epochs` explicitly (default 200 is likely
+too many without early stopping). All variants compose with `--model` and are
+reflected in the run tag (e.g. `MTA-Swin_pretrained_noval_focal2`,
+`MTA-Swin_pretrained_accuracy_v5`).
+
 ## Outputs (`experiments/mmotu_cls/outputs/`)
 
 - `summary_<ts>.csv` — accuracy, balanced acc, macro-F1/precision/sensitivity/specificity, MCC, ROC-AUC, params.

@@ -84,6 +84,8 @@ class MMOTUConfig:
     # use_class_weights: inverse-frequency class weights in CrossEntropyLoss.
     selection_metric: str = "accuracy"
     use_class_weights: bool = False
+    # Focal loss focusing parameter (only used when --loss focal).
+    focal_gamma: float = 2.0
 
     # MTA-Swin stage configuration -- must match how best_model.pth was
     # pretrained (this is the comparison-config setup).

@@ -36,6 +36,7 @@ import seaborn as sns
 import timm
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from PIL import Image
 from sklearn.metrics import (
@@ -249,6 +250,25 @@ def build_model(model_name: str, mode: str, config: MMOTUConfig) -> nn.Module:
     if model_name == "Custom CNN":
         return CustomCNN(num_classes=config.num_classes)  # always from scratch
     return create_torchvision_model(model_name, config.num_classes, pretrained=pretrained)
+
+
+class FocalLoss(nn.Module):
+    """Multi-class focal loss. `weight` is an optional per-class alpha tensor
+    (e.g. inverse-frequency class weights). gamma>0 down-weights easy examples."""
+
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.gamma = gamma
+        self.register_buffer("weight", weight if weight is not None else None)
+
+    def forward(self, logits, target):
+        logp = F.log_softmax(logits, dim=1)
+        logpt = logp.gather(1, target.unsqueeze(1)).squeeze(1)  # log p_t
+        pt = logpt.exp()
+        loss = -((1.0 - pt) ** self.gamma) * logpt
+        if self.weight is not None:
+            loss = loss * self.weight.to(logits.device)[target]
+        return loss.mean()
 
 
 def read_cls_dataframe(cls_path: Path, image_dir: Path) -> pd.DataFrame:
@@ -534,6 +554,30 @@ def main():
         action="store_true",
         help="Shortcut for imbalance handling: macro_f1 selection + class weights.",
     )
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=None,
+        help="Fraction of train_cls held out as validation (default: config / 0.2). Try 0.05.",
+    )
+    parser.add_argument(
+        "--loss",
+        choices=["ce", "focal"],
+        default="ce",
+        help="Loss function: cross-entropy (default) or focal loss.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=None,
+        help="Focal loss focusing parameter (default: config / 2.0). Only used with --loss focal.",
+    )
+    parser.add_argument(
+        "--no-val",
+        action="store_true",
+        help="Paper-style: no validation split; train on the full pool for a fixed "
+        "number of epochs (cosine LR, no early stopping) and evaluate the final model.",
+    )
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
@@ -542,9 +586,24 @@ def main():
     # Resolve imbalance-handling switches (CLI overrides config; --balanced is a shortcut).
     selection_metric = args.selection_metric or ("macro_f1" if args.balanced else config.selection_metric)
     use_class_weights = args.class_weights or args.balanced or config.use_class_weights
-    run_tag = (
-        f"{sanitize_name(args.model)}_{args.mode}_{selection_metric}" + ("_cw" if use_class_weights else "")
-    )
+    val_split = args.val_split if args.val_split is not None else config.validation_split
+    loss_type = args.loss
+    focal_gamma = args.focal_gamma if args.focal_gamma is not None else config.focal_gamma
+    no_val = args.no_val
+
+    # Descriptive run tag so different configs never overwrite each other's outputs.
+    tag_parts = [sanitize_name(args.model), args.mode]
+    if no_val:
+        tag_parts.append("noval")
+    else:
+        tag_parts.append(selection_metric)
+        if abs(val_split - 0.2) > 1e-9:
+            tag_parts.append(f"v{int(round(val_split * 100))}")
+    if loss_type == "focal":
+        tag_parts.append(f"focal{focal_gamma:g}")
+    if use_class_weights:
+        tag_parts.append("cw")
+    run_tag = "_".join(tag_parts)
     model_display = f"{args.model} ({args.mode})"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -556,8 +615,12 @@ def main():
     if args.model == "MTA-Swin" and args.mode == "pretrained":
         print(f"Pretrained wts:   {config.pretrained_weights_path}")
     print(f"Seed:             {config.seed}")
-    print(f"Selection metric: {selection_metric}")
+    print(f"Loss:             {'focal (gamma=%g)' % focal_gamma if loss_type == 'focal' else 'cross-entropy'}")
     print(f"Class weights:    {use_class_weights}")
+    if no_val:
+        print(f"Validation:       DISABLED (full pool, fixed {num_epochs} epochs, cosine LR)")
+    else:
+        print(f"Validation split: {val_split:.2f} | selection metric: {selection_metric}")
     print(f"Run tag:          {run_tag}\n")
 
     set_all_seeds(config.seed)
@@ -566,23 +629,29 @@ def main():
     full_train_df = read_cls_dataframe(config.train_cls_path, config.image_dir)
     test_df = read_cls_dataframe(config.val_cls_path, config.image_dir)
 
-    train_df, val_df = train_test_split(
-        full_train_df,
-        test_size=config.validation_split,
-        random_state=config.seed,
-        stratify=full_train_df["label"],
-    )
-    print(f"Split: train={len(train_df)} | val={len(val_df)} | test={len(test_df)}\n")
+    if no_val:
+        train_df = full_train_df
+        val_loader = None
+        print(f"Split: train={len(train_df)} (no val) | test={len(test_df)}\n")
+    else:
+        train_df, val_df = train_test_split(
+            full_train_df,
+            test_size=val_split,
+            random_state=config.seed,
+            stratify=full_train_df["label"],
+        )
+        print(f"Split: train={len(train_df)} | val={len(val_df)} | test={len(test_df)}\n")
 
     train_transform, eval_transform = build_transforms(config)
     train_loader = DataLoader(
         ImageDataset(train_df, train_transform), batch_size=config.batch_size, shuffle=True,
         num_workers=config.num_workers, pin_memory=config.pin_memory,
     )
-    val_loader = DataLoader(
-        ImageDataset(val_df, eval_transform), batch_size=config.batch_size, shuffle=False,
-        num_workers=config.num_workers, pin_memory=config.pin_memory,
-    )
+    if not no_val:
+        val_loader = DataLoader(
+            ImageDataset(val_df, eval_transform), batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+        )
     test_loader = DataLoader(
         ImageDataset(test_df, eval_transform), batch_size=config.batch_size, shuffle=False,
         num_workers=config.num_workers, pin_memory=config.pin_memory,
@@ -594,28 +663,36 @@ def main():
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}\n")
 
+    # ---- loss (optionally class-weighted; CE or focal) ----
+    class_weight_tensor = None
     if use_class_weights:
-        # Inverse-frequency ("balanced") weights from the TRAIN split only.
+        # Inverse-frequency ("balanced") weights from the training data only.
         counts = (
             train_df["label"].value_counts().reindex(range(config.num_classes), fill_value=0).sort_index().to_numpy()
         )
         counts = np.maximum(counts, 1)
         weights = counts.sum() / (config.num_classes * counts)
         class_weight_tensor = torch.tensor(weights, dtype=torch.float32, device=device)
-        criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=config.label_smoothing)
         print("Class weights (per label 0..7):", np.round(weights, 3).tolist())
+
+    if loss_type == "focal":
+        criterion = FocalLoss(gamma=focal_gamma, weight=class_weight_tensor)
     else:
-        criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=config.label_smoothing)
 
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=config.reduce_factor,
-        patience=config.reduce_patience, min_lr=config.min_lr,
-    )
+    if no_val:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=config.min_lr)
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=config.reduce_factor,
+            patience=config.reduce_patience, min_lr=config.min_lr,
+        )
     scaler = create_grad_scaler(device)
 
-    checkpoint_path = config.checkpoint_dir / f"best_mta_swin_pretrained_{run_tag}.pt"
-    early_stopping = EarlyStopping(config.early_stopping_patience, checkpoint_path, verbose=True)
+    config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = config.checkpoint_dir / f"best_{run_tag}.pt"
+    early_stopping = None if no_val else EarlyStopping(config.early_stopping_patience, checkpoint_path, verbose=True)
 
     # ---- train ----
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
@@ -623,14 +700,24 @@ def main():
     for epoch in range(num_epochs):
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+
+        if no_val:
+            scheduler.step()
+            lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"Epoch [{epoch + 1}/{num_epochs}] {time.time() - t0:.1f}s | LR {lr:.2e} | "
+                f"train loss {train_loss:.4f} acc {train_acc:.4f}"
+            )
+            continue
+
         val_loss, val_acc, val_true, val_pred = validate(model, val_loader, criterion, device)
         val_macro_f1 = float(precision_recall_fscore_support(val_true, val_pred, average="macro", zero_division=0)[2])
         val_score = selection_score(val_true, val_pred, selection_metric)
         scheduler.step(val_score)
 
-        train_losses.append(train_loss)
         val_losses.append(val_loss)
-        train_accs.append(train_acc)
         val_accs.append(val_acc)
 
         lr = optimizer.param_groups[0]["lr"]
@@ -646,9 +733,13 @@ def main():
             print(f"Early stopping at epoch {epoch + 1} (best {selection_metric} {early_stopping.best_value:.4f})")
             break
 
-    # ---- evaluate on held-out test (val_cls.txt) ----
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    print("\nRestored best checkpoint; evaluating on held-out test set (val_cls.txt)")
+    # ---- select model + evaluate on held-out test (val_cls.txt) ----
+    if no_val:
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"\nNo-val mode: using final model after {num_epochs} epochs; evaluating on test (val_cls.txt)")
+    else:
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        print("\nRestored best checkpoint; evaluating on held-out test set (val_cls.txt)")
 
     test_loss, test_acc, _, _ = validate(model, test_loader, criterion, device)
     predictions, true_labels, probabilities = evaluate_predictions(model, test_loader, device)
@@ -687,7 +778,10 @@ def main():
     summary_row = {
         "Model": model_display,
         "Seed": config.seed,
-        "Selection Metric": selection_metric,
+        "Loss": f"focal(g={focal_gamma:g})" if loss_type == "focal" else "ce",
+        "Selection Metric": "-" if no_val else selection_metric,
+        "Val Split": 0.0 if no_val else round(val_split, 3),
+        "No Val": no_val,
         "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
         "Balanced Accuracy (%)": round(bal_acc * 100, 3),
