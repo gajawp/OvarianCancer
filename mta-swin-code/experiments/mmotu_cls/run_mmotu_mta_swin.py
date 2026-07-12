@@ -242,7 +242,7 @@ class EarlyStopping:
 
     def _save_checkpoint(self, value: float, model: nn.Module):
         if self.verbose:
-            print(f"  val acc improved ({self.best_value:.4f} -> {value:.4f}); saving checkpoint")
+            print(f"  monitored score improved ({self.best_value:.4f} -> {value:.4f}); saving checkpoint")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), self.path)
         self.best_value = value
@@ -271,19 +271,35 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler):
 
 @torch.no_grad()
 def validate(model, dataloader, criterion, device):
+    """Returns (loss, accuracy, y_true, y_pred) so callers can also compute
+    imbalance-aware selection metrics without a second forward pass."""
     model.eval()
     running_loss = 0.0
-    correct = 0
     total = 0
+    y_true: list[int] = []
+    y_pred: list[int] = []
     for images, labels in dataloader:
         images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+        targets = labels.to(device, non_blocking=True)
         outputs = model(images)
-        loss = criterion(outputs, labels)
+        loss = criterion(outputs, targets)
         running_loss += loss.item() * images.size(0)
         total += labels.size(0)
-        correct += (outputs.argmax(dim=1) == labels).sum().item()
-    return running_loss / total, correct / total
+        y_pred.extend(outputs.argmax(dim=1).cpu().numpy())
+        y_true.extend(labels.numpy())
+    y_true_arr = np.asarray(y_true, dtype=np.int64)
+    y_pred_arr = np.asarray(y_pred, dtype=np.int64)
+    accuracy = float((y_true_arr == y_pred_arr).mean()) if total else 0.0
+    return running_loss / total, accuracy, y_true_arr, y_pred_arr
+
+
+def selection_score(y_true, y_pred, metric: str) -> float:
+    """Higher-is-better score used for early stopping / LR scheduling."""
+    if metric == "macro_f1":
+        return float(precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)[2])
+    if metric == "balanced_accuracy":
+        return float(balanced_accuracy_score(y_true, y_pred))
+    return float(accuracy_score(y_true, y_pred))  # "accuracy"
 
 
 @torch.no_grad()
@@ -400,10 +416,31 @@ def main():
     parser = argparse.ArgumentParser(description="MTA-Swin (pretrained) on MMOTU OTU_2d 8-class classification.")
     parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs (default: config).")
     parser.add_argument("--no-plots", action="store_true", help="Skip saving training curves / confusion matrix.")
+    parser.add_argument(
+        "--selection-metric",
+        choices=["accuracy", "macro_f1", "balanced_accuracy"],
+        default=None,
+        help="Val metric that early stopping + LR scheduler track (default: config / accuracy).",
+    )
+    parser.add_argument(
+        "--class-weights",
+        action="store_true",
+        help="Use inverse-frequency class weights in CrossEntropyLoss.",
+    )
+    parser.add_argument(
+        "--balanced",
+        action="store_true",
+        help="Shortcut for imbalance handling: macro_f1 selection + class weights.",
+    )
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
     num_epochs = args.epochs if args.epochs is not None else config.num_epochs
+
+    # Resolve imbalance-handling switches (CLI overrides config; --balanced is a shortcut).
+    selection_metric = args.selection_metric or ("macro_f1" if args.balanced else config.selection_metric)
+    use_class_weights = args.class_weights or args.balanced or config.use_class_weights
+    run_tag = selection_metric + ("_cw" if use_class_weights else "")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -411,7 +448,10 @@ def main():
     print(f"Train cls file:   {config.train_cls_path}")
     print(f"Val (test) cls:   {config.val_cls_path}")
     print(f"Pretrained wts:   {config.pretrained_weights_path}")
-    print(f"Seed:             {config.seed}\n")
+    print(f"Seed:             {config.seed}")
+    print(f"Selection metric: {selection_metric}")
+    print(f"Class weights:    {use_class_weights}")
+    print(f"Run tag:          {run_tag}\n")
 
     set_all_seeds(config.seed)
 
@@ -447,7 +487,19 @@ def main():
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}\n")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+    if use_class_weights:
+        # Inverse-frequency ("balanced") weights from the TRAIN split only.
+        counts = (
+            train_df["label"].value_counts().reindex(range(config.num_classes), fill_value=0).sort_index().to_numpy()
+        )
+        counts = np.maximum(counts, 1)
+        weights = counts.sum() / (config.num_classes * counts)
+        class_weight_tensor = torch.tensor(weights, dtype=torch.float32, device=device)
+        criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=config.label_smoothing)
+        print("Class weights (per label 0..7):", np.round(weights, 3).tolist())
+    else:
+        criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=config.reduce_factor,
@@ -455,7 +507,7 @@ def main():
     )
     scaler = create_grad_scaler(device)
 
-    checkpoint_path = config.checkpoint_dir / "best_mta_swin_pretrained.pt"
+    checkpoint_path = config.checkpoint_dir / f"best_mta_swin_pretrained_{run_tag}.pt"
     early_stopping = EarlyStopping(config.early_stopping_patience, checkpoint_path, verbose=True)
 
     # ---- train ----
@@ -464,8 +516,10 @@ def main():
     for epoch in range(num_epochs):
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler)
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
-        scheduler.step(val_acc)
+        val_loss, val_acc, val_true, val_pred = validate(model, val_loader, criterion, device)
+        val_macro_f1 = float(precision_recall_fscore_support(val_true, val_pred, average="macro", zero_division=0)[2])
+        val_score = selection_score(val_true, val_pred, selection_metric)
+        scheduler.step(val_score)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -476,19 +530,20 @@ def main():
         print(
             f"Epoch [{epoch + 1}/{num_epochs}] {time.time() - t0:.1f}s | LR {lr:.2e} | "
             f"train loss {train_loss:.4f} acc {train_acc:.4f} | "
-            f"val loss {val_loss:.4f} acc {val_acc:.4f} | best {early_stopping.best_value:.4f}"
+            f"val loss {val_loss:.4f} acc {val_acc:.4f} f1 {val_macro_f1:.4f} | "
+            f"[{selection_metric}] {val_score:.4f} best {early_stopping.best_value:.4f}"
         )
 
-        early_stopping(val_acc, model)
+        early_stopping(val_score, model)
         if early_stopping.should_stop:
-            print(f"Early stopping at epoch {epoch + 1} (best val acc {early_stopping.best_value:.4f})")
+            print(f"Early stopping at epoch {epoch + 1} (best {selection_metric} {early_stopping.best_value:.4f})")
             break
 
     # ---- evaluate on held-out test (val_cls.txt) ----
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     print("\nRestored best checkpoint; evaluating on held-out test set (val_cls.txt)")
 
-    test_loss, test_acc = validate(model, test_loader, criterion, device)
+    test_loss, test_acc, _, _ = validate(model, test_loader, criterion, device)
     predictions, true_labels, probabilities = evaluate_predictions(model, test_loader, device)
     cm, metrics_df, summary = build_per_class_metrics_table(true_labels, predictions, list(CLASS_NAMES))
 
@@ -525,6 +580,8 @@ def main():
     summary_row = {
         "Model": "MTA-Swin (pretrained)",
         "Seed": config.seed,
+        "Selection Metric": selection_metric,
+        "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
         "Balanced Accuracy (%)": round(bal_acc * 100, 3),
         "Macro F1 (%)": round(summary["macro_f1"] * 100, 3),
@@ -536,20 +593,20 @@ def main():
         "Parameters": int(num_params),
         "Misclassified (n/total)": f"{summary['total_misclassified']}/{len(true_labels)}",
     }
-    pd.DataFrame([summary_row]).to_csv(config.output_dir / f"summary_{timestamp}.csv", index=False)
-    metrics_df.to_csv(config.output_dir / f"per_class_{timestamp}.csv", index=False)
+    pd.DataFrame([summary_row]).to_csv(config.output_dir / f"summary_{run_tag}_{timestamp}.csv", index=False)
+    metrics_df.to_csv(config.output_dir / f"per_class_{run_tag}_{timestamp}.csv", index=False)
     print(f"\nSaved summary + per-class CSVs to {config.output_dir}")
 
     if not args.no_plots:
         save_training_curves(
             train_losses, val_losses, train_accs, val_accs,
-            title="MTA-Swin (pretrained) - MMOTU OTU_2d",
-            output_path=config.plot_dir / f"training_curves_{timestamp}.png",
+            title=f"MTA-Swin (pretrained) - MMOTU OTU_2d [{run_tag}]",
+            output_path=config.plot_dir / f"training_curves_{run_tag}_{timestamp}.png",
         )
         save_confusion_matrix(
             cm, list(CLASS_NAMES),
-            title="Confusion Matrix - MTA-Swin (pretrained) - MMOTU OTU_2d",
-            output_path=config.plot_dir / f"confusion_matrix_{timestamp}.png",
+            title=f"Confusion Matrix - MTA-Swin (pretrained) - MMOTU OTU_2d [{run_tag}]",
+            output_path=config.plot_dir / f"confusion_matrix_{run_tag}_{timestamp}.png",
         )
         print(f"Saved plots to {config.plot_dir}")
 

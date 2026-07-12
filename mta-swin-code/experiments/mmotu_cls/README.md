@@ -58,6 +58,28 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py
 # quick smoke test:  python experiments/mmotu_cls/run_mmotu_mta_swin.py --epochs 2
 ```
 
+### Imbalance handling (optional)
+
+Defaults reproduce the original run (accuracy-based early stopping, no class
+weights). MMOTU is imbalanced, so these switches usually help minority-class
+recall / macro-F1:
+
+```bash
+# early stopping + LR scheduler track macro-F1 instead of accuracy
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --selection-metric macro_f1
+
+# inverse-frequency class-weighted CrossEntropy
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --class-weights
+
+# shortcut for both (macro-F1 selection + class weights)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --balanced
+```
+
+Each configuration is tagged (`accuracy`, `macro_f1`, `macro_f1_cw`, ...) in its
+output filenames and checkpoint, so runs don't overwrite each other and are easy
+to compare. The summary CSV records the selection metric and whether class
+weights were used.
+
 ## Outputs (`experiments/mmotu_cls/outputs/`)
 
 - `summary_<ts>.csv` — accuracy, balanced acc, macro-F1/precision/sensitivity/specificity, MCC, ROC-AUC, params.

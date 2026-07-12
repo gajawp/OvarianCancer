@@ -78,6 +78,13 @@ class MMOTUConfig:
     # Fixed seed for the train/val split and all RNGs (per request).
     seed: int = 42
 
+    # Imbalance handling (defaults preserve the original run; override via CLI).
+    # selection_metric: which val metric early stopping + LR scheduler track
+    #   ("accuracy" | "macro_f1" | "balanced_accuracy").
+    # use_class_weights: inverse-frequency class weights in CrossEntropyLoss.
+    selection_metric: str = "accuracy"
+    use_class_weights: bool = False
+
     # MTA-Swin stage configuration -- must match how best_model.pth was
     # pretrained (this is the comparison-config setup).
     mta_stage_qk_conv: tuple[bool, bool, bool, bool] = (True, True, False, False)
