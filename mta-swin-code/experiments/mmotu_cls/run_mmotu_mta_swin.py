@@ -344,15 +344,27 @@ def build_transforms(config: MMOTUConfig, aug: str = "default"):
     mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     normalize = transforms.Normalize(mean=mean, std=std)
 
+    # All presets keep the WHOLE image (Resize, never RandomResizedCrop) so the
+    # lesion is never cropped out of frame -- important for small ultrasound ROIs.
     if aug == "none":
         train_ops = [transforms.Resize(size, antialias=True), transforms.ToTensor(), normalize]
-    elif aug == "strong":
-        # Heavier, ultrasound-flavored augmentation.
+    elif aug == "medium":
         train_ops = [
-            transforms.RandomResizedCrop(size, scale=(0.7, 1.0), ratio=(0.8, 1.25), antialias=True),
+            transforms.Resize(size, antialias=True),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomAffine(degrees=15, translate=(0.08, 0.08), scale=(0.9, 1.1)),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3),
+            transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 1.0))], p=0.2),
+            transforms.ToTensor(),
+            normalize,
+        ]
+    elif aug == "strong":
+        # Strong but lesion-preserving (no RandomResizedCrop).
+        train_ops = [
+            transforms.Resize(size, antialias=True),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomAffine(degrees=20, translate=(0.10, 0.10), scale=(0.85, 1.15)),
+            transforms.ColorJitter(brightness=0.25, contrast=0.25),
             transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 1.5))], p=0.3),
             transforms.ToTensor(),
             normalize,
@@ -650,6 +662,14 @@ def main():
         "that oversamples minority classes).",
     )
     parser.add_argument(
+        "--sampler-beta",
+        type=float,
+        default=0.5,
+        help="Rebalancing strength for --sampler balanced: sample weight ~ count^(-beta). "
+        "1.0 = full inverse-frequency (aggressive), 0.5 = inverse sqrt (gentle, recommended), "
+        "0.0 = no rebalancing.",
+    )
+    parser.add_argument(
         "--roi",
         choices=["none", "crop", "mask"],
         default="none",
@@ -658,9 +678,10 @@ def main():
     )
     parser.add_argument(
         "--aug",
-        choices=["default", "strong", "none"],
+        choices=["default", "medium", "strong", "none"],
         default="default",
-        help="Training augmentation preset (eval is always resize+normalize).",
+        help="Training augmentation preset (eval is always resize+normalize). "
+        "medium/strong are lesion-preserving (no RandomResizedCrop).",
     )
     args = parser.parse_args()
 
@@ -676,6 +697,7 @@ def main():
     no_val = args.no_val
     seed = args.seed if args.seed is not None else config.seed
     sampler_type = args.sampler
+    sampler_beta = args.sampler_beta
     roi_mode = args.roi
     aug = args.aug
 
@@ -693,7 +715,7 @@ def main():
     if aug != "default":
         tag_parts.append(f"aug{aug}")
     if sampler_type != "none":
-        tag_parts.append("samp")
+        tag_parts.append("samp" if sampler_beta == 1.0 else f"samp{sampler_beta:g}")
     if loss_type == "focal":
         tag_parts.append(f"focal{focal_gamma:g}")
     if use_class_weights:
@@ -713,7 +735,7 @@ def main():
     print(f"Seed:             {seed}")
     print(f"Loss:             {'focal (gamma=%g)' % focal_gamma if loss_type == 'focal' else 'cross-entropy'}")
     print(f"Class weights:    {use_class_weights}")
-    print(f"Sampler:          {sampler_type}")
+    print(f"Sampler:          {sampler_type}" + (f" (beta={sampler_beta:g})" if sampler_type != "none" else ""))
     print(f"ROI:              {roi_mode}" + (f" (masks: {config.mask_dir})" if roi_mode != "none" else ""))
     print(f"Augmentation:     {aug}")
     if no_val:
@@ -748,8 +770,11 @@ def main():
     # Balanced sampler oversamples minority classes (mutually exclusive with shuffle).
     if sampler_type == "balanced":
         counts = train_df["label"].value_counts().reindex(range(config.num_classes), fill_value=0).sort_index()
-        counts = np.maximum(counts.to_numpy(), 1)
-        per_sample_w = (1.0 / counts)[train_df["label"].to_numpy()]
+        counts = np.maximum(counts.to_numpy(), 1).astype(float)
+        # weight ~ count^(-beta): beta=1 full balance, beta=0.5 sqrt (gentle), beta=0 none
+        per_class_w = counts ** (-sampler_beta)
+        per_sample_w = per_class_w[train_df["label"].to_numpy()]
+        print(f"Sampler per-class weight (beta={sampler_beta:g}):", np.round(per_class_w / per_class_w.min(), 2).tolist())
         sampler = WeightedRandomSampler(
             weights=torch.as_tensor(per_sample_w, dtype=torch.double),
             num_samples=len(train_df),
@@ -899,7 +924,7 @@ def main():
         "Selection Metric": "-" if no_val else selection_metric,
         "Val Split": 0.0 if no_val else round(val_split, 3),
         "No Val": no_val,
-        "Sampler": sampler_type,
+        "Sampler": sampler_type if sampler_type == "none" else f"{sampler_type}(b={sampler_beta:g})",
         "ROI": roi_mode,
         "Aug": aug,
         "Class Weights": use_class_weights,

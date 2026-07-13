@@ -125,20 +125,26 @@ Three orthogonal, opt-in switches (no architecture change); all compose and are
 encoded in the run tag.
 
 ```bash
-# 1) balanced sampling (WeightedRandomSampler oversamples minority classes)
-python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced
+# 1) balanced sampling. --sampler-beta controls strength: weight ~ count^(-beta).
+#    beta=0.5 (default, inverse-sqrt, gentle) is recommended; beta=1.0 = full
+#    inverse-frequency (aggressive, tends to overfit tiny classes); beta=0 = off.
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced                    # beta=0.5
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced --sampler-beta 1.0 # aggressive
 
 # 2) ROI: crop to the tumor bbox from the binary mask ("crop"), or also zero the
 #    background ("mask"). Applied identically to train/val/test.
 python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi crop
 python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi mask
 
-# 3) augmentation preset: default (mild) | strong (RandomResizedCrop + flip +
-#    ColorJitter + blur + speckle-like noise) | none
+# 3) augmentation preset: none | default (mild) | medium | strong.
+#    medium/strong are LESION-PRESERVING (no RandomResizedCrop): flip + affine +
+#    mild ColorJitter + blur (+ speckle-like noise for strong).
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --aug medium
 python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --aug strong
 
-# combine freely
-python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi crop --aug strong --sampler balanced
+# sampling + augmentation are synergistic -- oversampled minority copies should be
+# varied by augmentation, so try them together:
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced --aug medium
 ```
 
 `--roi` needs the masks in `OTU_2d/annotations/<id>_binary.PNG` (override dir via
