@@ -145,7 +145,15 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --aug s
 # sampling + augmentation are synergistic -- oversampled minority copies should be
 # varied by augmentation, so try them together:
 python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced --aug medium
+
+# 4) MixUp/CutMix (timm): synthesizes new samples by mixing images+labels; uses
+#    soft-target CE while mixing (class weights / focal ignored during mixing).
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --mixup
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --mixup --aug strong --sampler balanced
 ```
+
+Note: under `--mixup`, per-epoch train accuracy is reported as `nan` (targets are
+soft); judge by val/test metrics as usual.
 
 `--roi` needs the masks in `OTU_2d/annotations/<id>_binary.PNG` (override dir via
 `MMOTU_MASK_DIR`). Images with a missing/empty mask fall back to the full image.

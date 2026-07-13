@@ -427,7 +427,7 @@ class EarlyStopping:
         self.best_value = value
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mixup_fn=None):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -435,17 +435,25 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler):
     for images, labels in dataloader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        # MixUp/CutMix turns hard labels into soft targets (needs a soft-target loss).
+        if mixup_fn is not None:
+            images, targets = mixup_fn(images, labels)
+        else:
+            targets = labels
         optimizer.zero_grad()
         with autocast_context(device):
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs, targets)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         running_loss += loss.item() * images.size(0)
         total += labels.size(0)
-        correct += (outputs.argmax(dim=1) == labels).sum().item()
-    return running_loss / total, correct / total
+        if mixup_fn is None:
+            correct += (outputs.argmax(dim=1) == labels).sum().item()
+    # train accuracy is undefined under mixup (targets are soft)
+    train_acc = float("nan") if mixup_fn is not None else correct / total
+    return running_loss / total, train_acc
 
 
 @torch.no_grad()
@@ -683,6 +691,19 @@ def main():
         help="Training augmentation preset (eval is always resize+normalize). "
         "medium/strong are lesion-preserving (no RandomResizedCrop).",
     )
+    parser.add_argument(
+        "--mixup",
+        action="store_true",
+        help="Enable MixUp/CutMix (timm), synthesizing new samples by mixing images "
+        "+ labels. Uses soft-target cross-entropy for training (class weights / focal "
+        "are ignored while mixing).",
+    )
+    parser.add_argument(
+        "--mixup-alpha", type=float, default=0.2, help="MixUp Beta alpha (default 0.2)."
+    )
+    parser.add_argument(
+        "--cutmix-alpha", type=float, default=1.0, help="CutMix Beta alpha (default 1.0)."
+    )
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
@@ -700,6 +721,7 @@ def main():
     sampler_beta = args.sampler_beta
     roi_mode = args.roi
     aug = args.aug
+    use_mixup = args.mixup
 
     # Descriptive run tag so different configs never overwrite each other's outputs.
     tag_parts = [sanitize_name(args.model), args.mode]
@@ -714,6 +736,8 @@ def main():
         tag_parts.append(f"roi{roi_mode}")
     if aug != "default":
         tag_parts.append(f"aug{aug}")
+    if use_mixup:
+        tag_parts.append("mixup")
     if sampler_type != "none":
         tag_parts.append("samp" if sampler_beta == 1.0 else f"samp{sampler_beta:g}")
     if loss_type == "focal":
@@ -738,6 +762,7 @@ def main():
     print(f"Sampler:          {sampler_type}" + (f" (beta={sampler_beta:g})" if sampler_type != "none" else ""))
     print(f"ROI:              {roi_mode}" + (f" (masks: {config.mask_dir})" if roi_mode != "none" else ""))
     print(f"Augmentation:     {aug}")
+    print(f"MixUp/CutMix:     {use_mixup}" + (f" (mixup_a={args.mixup_alpha:g}, cutmix_a={args.cutmix_alpha:g})" if use_mixup else ""))
     if no_val:
         print(f"Validation:       DISABLED (full pool, fixed {num_epochs} epochs, cosine LR)")
     else:
@@ -822,6 +847,27 @@ def main():
     else:
         criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=config.label_smoothing)
 
+    # MixUp/CutMix: mixes images+labels into soft targets -> needs a soft-target
+    # loss for training. `criterion` (hard-label) is still used for val/test.
+    mixup_fn = None
+    train_criterion = criterion
+    if use_mixup:
+        from timm.data import Mixup
+        from timm.loss import SoftTargetCrossEntropy
+
+        if use_class_weights or loss_type == "focal":
+            print("[MixUp] note: class weights / focal are ignored while mixing (soft-target CE used).")
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup_alpha,
+            cutmix_alpha=args.cutmix_alpha,
+            prob=1.0,
+            switch_prob=0.5,
+            mode="batch",
+            label_smoothing=config.label_smoothing,
+            num_classes=config.num_classes,
+        )
+        train_criterion = SoftTargetCrossEntropy()
+
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     if no_val:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=config.min_lr)
@@ -841,7 +887,9 @@ def main():
     print("Starting training\n" + "-" * 60)
     for epoch in range(num_epochs):
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, train_criterion, optimizer, device, scaler, mixup_fn=mixup_fn
+        )
         train_losses.append(train_loss)
         train_accs.append(train_acc)
 
@@ -927,6 +975,7 @@ def main():
         "Sampler": sampler_type if sampler_type == "none" else f"{sampler_type}(b={sampler_beta:g})",
         "ROI": roi_mode,
         "Aug": aug,
+        "MixUp": use_mixup,
         "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
         "Balanced Accuracy (%)": round(bal_acc * 100, 3),
