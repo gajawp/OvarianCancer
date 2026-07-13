@@ -1,0 +1,2 @@
+Model,Seed,Loss,Selection Metric,Val Split,No Val,Class Weights,Accuracy (%),Balanced Accuracy (%),Macro F1 (%),Macro Precision (%),Macro Sensitivity (%),Macro Specificity (%),MCC,ROC-AUC (%),Parameters,Misclassified (n/total)
+Swin-T (pretrained),2,ce,-,0.0,True,False,77.825,70.562,72.249,74.907,70.562,96.707,0.7313,93.265,27525506,104/469
