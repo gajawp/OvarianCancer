@@ -444,6 +444,14 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mix
         with autocast_context(device):
             outputs = model(images)
             loss = criterion(outputs, targets)
+        # Safety net: skip a batch whose loss is non-finite instead of poisoning
+        # the weights (AMP also skips on inf/nan, this makes it visible).
+        if not torch.isfinite(loss):
+            if not getattr(train_one_epoch, "_nan_warned", False):
+                print("[WARNING] non-finite loss encountered; skipping batch(es). "
+                      "If frequent, lower LR or disable AMP.")
+                train_one_epoch._nan_warned = True
+            continue
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -452,6 +460,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mix
         if mixup_fn is None:
             correct += (outputs.argmax(dim=1) == labels).sum().item()
     # train accuracy is undefined under mixup (targets are soft)
+    total = max(total, 1)  # avoid div-by-zero if every batch was skipped (all-nan loss)
     train_acc = float("nan") if mixup_fn is not None else correct / total
     return running_loss / total, train_acc
 
@@ -892,13 +901,15 @@ def main():
         )
         train_losses.append(train_loss)
         train_accs.append(train_acc)
+        # train_acc is nan by design under --mixup (soft targets); show n/a, not "nan".
+        acc_str = "n/a" if train_acc != train_acc else f"{train_acc:.4f}"
 
         if no_val:
             scheduler.step()
             lr = optimizer.param_groups[0]["lr"]
             print(
                 f"Epoch [{epoch + 1}/{num_epochs}] {time.time() - t0:.1f}s | LR {lr:.2e} | "
-                f"train loss {train_loss:.4f} acc {train_acc:.4f}"
+                f"train loss {train_loss:.4f} acc {acc_str}"
             )
             continue
 
@@ -913,7 +924,7 @@ def main():
         lr = optimizer.param_groups[0]["lr"]
         print(
             f"Epoch [{epoch + 1}/{num_epochs}] {time.time() - t0:.1f}s | LR {lr:.2e} | "
-            f"train loss {train_loss:.4f} acc {train_acc:.4f} | "
+            f"train loss {train_loss:.4f} acc {acc_str} | "
             f"val loss {val_loss:.4f} acc {val_acc:.4f} f1 {val_macro_f1:.4f} | "
             f"[{selection_metric}] {val_score:.4f} best {early_stopping.best_value:.4f}"
         )
