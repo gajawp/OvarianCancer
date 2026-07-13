@@ -1,0 +1,2 @@
+Model,Seed,Loss,Selection Metric,Val Split,No Val,Sampler,ROI,Aug,Class Weights,Accuracy (%),Balanced Accuracy (%),Macro F1 (%),Macro Precision (%),Macro Sensitivity (%),Macro Specificity (%),MCC,ROC-AUC (%),Parameters,Misclassified (n/total)
+MTA-Swin (pretrained),42,ce,-,0.0,True,balanced(b=1),none,default,False,76.119,70.026,71.726,74.484,70.026,96.415,0.7102,93.402,27527906,112/469
