@@ -1,0 +1,16 @@
+# Model weights
+*.pth
+*.pt
+*.ckpt
+**/weights/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/

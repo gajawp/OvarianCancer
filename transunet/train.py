@@ -1,0 +1,256 @@
+import time
+
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+
+from common import config
+from common.metrics import (
+    dice_score,
+    iou_score,
+)
+from common.utils import (
+    create_data_loaders,
+    set_random_seed,
+)
+from transunet.model import TransUNet
+
+
+class DiceLoss(nn.Module):
+    def forward(self, logits, target):
+        probabilities = torch.sigmoid(
+            logits
+        ).flatten(1)
+
+        target = target.flatten(1)
+
+        intersection = (
+            probabilities * target
+        ).sum(dim=1)
+
+        smooth = 1e-6
+
+        dice = (
+            2.0 * intersection + smooth
+        ) / (
+            probabilities.sum(dim=1)
+            + target.sum(dim=1)
+            + smooth
+        )
+
+        return 1.0 - dice.mean()
+
+
+BCE_LOSS = nn.BCEWithLogitsLoss()
+DICE_LOSS = DiceLoss()
+
+
+def segmentation_loss(logits, target):
+    return (
+        BCE_LOSS(logits, target)
+        + DICE_LOSS(logits, target)
+    )
+
+
+def validate_model(
+    model,
+    validation_loader,
+    device,
+):
+    model.eval()
+
+    total_dice = 0.0
+    total_iou = 0.0
+
+    with torch.no_grad():
+        for images, masks in validation_loader:
+            images = images.to(device)
+            masks = masks.to(device)
+
+            logits = model(images)
+
+            total_dice += dice_score(
+                logits,
+                masks,
+                threshold=config.PREDICTION_THRESHOLD,
+            ).item()
+
+            total_iou += iou_score(
+                logits,
+                masks,
+                threshold=config.PREDICTION_THRESHOLD,
+            ).item()
+
+    return (
+        total_dice / len(validation_loader),
+        total_iou / len(validation_loader),
+    )
+
+
+def main():
+    set_random_seed(
+        config.RANDOM_SEED
+    )
+
+    device = torch.device(
+        getattr(
+            config,
+            "TRANSUNET_DEVICE",
+            config.DEVICE,
+        )
+    )
+
+    train_loader, validation_loader = (
+        create_data_loaders(config)
+    )
+
+    model = TransUNet(
+        in_channels=3,
+        out_channels=1,
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.LEARNING_RATE,
+        weight_decay=1e-4,
+    )
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-7,
+    )
+
+    checkpoint_path = (
+        config.TRANSUNET_MODEL_PATH
+    )
+
+    checkpoint_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    best_dice = -1.0
+    epochs_without_improvement = 0
+
+    print("Training TransUNet")
+    print("------------------")
+    print("Device:", device)
+    print(
+        "Training images:",
+        len(train_loader.dataset),
+    )
+    print(
+        "Validation images:",
+        len(validation_loader.dataset),
+    )
+
+    for epoch in range(
+        config.EPOCHS
+    ):
+        start_time = time.time()
+
+        model.train()
+        total_loss = 0.0
+
+        progress_bar = tqdm(
+            train_loader,
+            desc=(
+                f"Epoch {epoch + 1}/"
+                f"{config.EPOCHS}"
+            ),
+        )
+
+        for images, masks in progress_bar:
+            images = images.to(device)
+            masks = masks.to(device)
+
+            optimizer.zero_grad()
+
+            logits = model(images)
+
+            loss = segmentation_loss(
+                logits,
+                masks,
+            )
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+            progress_bar.set_postfix(
+                loss=f"{loss.item():.4f}"
+            )
+
+        average_loss = (
+            total_loss / len(train_loader)
+        )
+
+        validation_dice, validation_iou = (
+            validate_model(
+                model,
+                validation_loader,
+                device,
+            )
+        )
+
+        scheduler.step(
+            validation_dice
+        )
+
+        print(
+            f"Epoch [{epoch + 1}/"
+            f"{config.EPOCHS}] "
+            f"Loss: {average_loss:.4f} "
+            f"Dice: {validation_dice:.4f} "
+            f"IoU: {validation_iou:.4f} "
+            f"LR: "
+            f"{optimizer.param_groups[0]['lr']:.7f} "
+            f"Time: "
+            f"{time.time() - start_time:.1f}s"
+        )
+
+        if validation_dice > best_dice:
+            best_dice = validation_dice
+            epochs_without_improvement = 0
+
+            torch.save(
+                model.state_dict(),
+                checkpoint_path,
+            )
+
+            print(
+                f"Model saved: "
+                f"{checkpoint_path} "
+                f"(best Dice: "
+                f"{best_dice:.4f})"
+            )
+
+        else:
+            epochs_without_improvement += 1
+
+        if (
+            epochs_without_improvement
+            >= config.EARLY_STOPPING_PATIENCE
+        ):
+            print(
+                "Early stopping triggered."
+            )
+            break
+
+    print("\nTraining completed.")
+    print(
+        f"Best validation Dice: "
+        f"{best_dice:.4f}"
+    )
+    print(
+        "Checkpoint:",
+        checkpoint_path,
+    )
+
+
+if __name__ == "__main__":
+    main()

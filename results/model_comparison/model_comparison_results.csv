@@ -1,0 +1,8 @@
+Model,Loss,Dice,IoU,Precision,Recall,Specificity,Hausdorff Distance,Status
+Attention U-Net,,0.8369,0.7567,0.8535,0.869,0.9807,25.9647,Partial metrics
+DeepLabV3+,,0.8377,0.7564,0.8712,0.8449,0.9838,23.9742,Partial metrics
+DS2Net,,0.8457,0.765,0.8697,0.8622,0.9831,26.6019,Partial metrics
+DSNet,,0.834,0.7542,0.8661,0.8519,0.9827,26.5425,Partial metrics
+SegFormer,,0.8101,0.7173,0.7954,0.8742,0.9735,27.5464,Partial metrics
+TransUNet,,0.839,0.758,0.8577,0.8629,0.9815,26.8289,Partial metrics
+U-Net++,,0.8304,0.7482,0.8513,0.8584,0.9805,25.9547,Partial metrics
