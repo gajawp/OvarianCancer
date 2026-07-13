@@ -20,11 +20,13 @@ MTA_ROOT = MMOTU_DIR.parents[1]                       # mta-swin-code (has src/,
 REPO_ROOT = MMOTU_DIR.parents[2]                      # project root (has OTU_2d/)
 
 IMAGE_DIR_ENV_VAR = "MMOTU_IMAGE_DIR"
+MASK_DIR_ENV_VAR = "MMOTU_MASK_DIR"
 TRAIN_CLS_ENV_VAR = "MMOTU_TRAIN_CLS"
 VAL_CLS_ENV_VAR = "MMOTU_VAL_CLS"
 PRETRAINED_WEIGHTS_ENV_VAR = "MTA_PRETRAINED_WEIGHTS"
 
 DEFAULT_IMAGE_DIR = REPO_ROOT / "OTU_2d" / "images"
+DEFAULT_MASK_DIR = REPO_ROOT / "OTU_2d" / "annotations"
 DEFAULT_TRAIN_CLS = REPO_ROOT / "OTU_2d" / "train_cls.txt"
 DEFAULT_VAL_CLS = REPO_ROOT / "OTU_2d" / "val_cls.txt"
 DEFAULT_PRETRAINED_WEIGHTS = MTA_ROOT / "best_model.pth"
@@ -52,6 +54,7 @@ def _path_from_env(env_var: str, default: Path) -> Path:
 @dataclass(frozen=True)
 class MMOTUConfig:
     image_dir: Path = field(default_factory=lambda: _path_from_env(IMAGE_DIR_ENV_VAR, DEFAULT_IMAGE_DIR))
+    mask_dir: Path = field(default_factory=lambda: _path_from_env(MASK_DIR_ENV_VAR, DEFAULT_MASK_DIR))
     train_cls_path: Path = field(default_factory=lambda: _path_from_env(TRAIN_CLS_ENV_VAR, DEFAULT_TRAIN_CLS))
     val_cls_path: Path = field(default_factory=lambda: _path_from_env(VAL_CLS_ENV_VAR, DEFAULT_VAL_CLS))
     pretrained_weights_path: Path = field(

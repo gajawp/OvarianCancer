@@ -49,7 +49,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import models, transforms
 
 from config import CLASS_NAMES, DEFAULT_CONFIG, MMOTUConfig, MTA_ROOT, PRETRAINED_WEIGHTS_ENV_VAR
@@ -83,19 +83,66 @@ except ImportError:  # older torch
 
 
 class ImageDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, transform=None):
+    """Image classification dataset. Optional ROI mode uses the binary tumor
+    mask (OTU_2d/annotations/<id>_binary.PNG) to crop to the lesion bounding
+    box ("crop") and optionally zero out the background ("mask")."""
+
+    def __init__(self, df: pd.DataFrame, transform=None, roi_mode="none", mask_dir=None, roi_pad=0.15):
         self.df = df.reset_index(drop=True)
         self.transform = transform
+        self.roi_mode = roi_mode
+        self.mask_dir = Path(mask_dir) if mask_dir is not None else None
+        self.roi_pad = roi_pad
+        self._roi_warned = False
 
     def __len__(self) -> int:
         return len(self.df)
 
+    def _apply_roi(self, image: Image.Image, file_path: str) -> Image.Image:
+        mask_path = self.mask_dir / f"{Path(file_path).stem}_binary.PNG"
+        if not mask_path.exists():
+            if not self._roi_warned:
+                print(f"[ROI] mask not found (e.g. {mask_path.name}); falling back to full image")
+                self._roi_warned = True
+            return image
+        # Mask is same size as image in MMOTU; resize defensively (nearest keeps it binary).
+        mask = Image.open(mask_path).convert("L").resize(image.size, Image.NEAREST)
+        m = np.array(mask) > 0
+        ys, xs = np.where(m)
+        if xs.size == 0:  # empty mask (e.g. normal ovary) -> keep full image
+            return image
+        if self.roi_mode == "mask":
+            arr = np.array(image) * m[..., None]
+            image = Image.fromarray(arr.astype(np.uint8))
+        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+        W, H = image.size
+        px, py = int((x1 - x0) * self.roi_pad), int((y1 - y0) * self.roi_pad)
+        x0, y0 = max(0, x0 - px), max(0, y0 - py)
+        x1, y1 = min(W - 1, x1 + px), min(H - 1, y1 + py)
+        return image.crop((x0, y0, x1 + 1, y1 + 1))
+
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
         image = Image.open(row["file_path"]).convert("RGB")
+        if self.roi_mode != "none" and self.mask_dir is not None:
+            image = self._apply_roi(image, row["file_path"])
         if self.transform is not None:
             image = self.transform(image)
         return image, int(row["label"])
+
+
+class AddGaussianNoise:
+    """Additive Gaussian noise on the (normalized) tensor -- a cheap stand-in
+    for ultrasound speckle. Applied with probability p."""
+
+    def __init__(self, std: float = 0.03, p: float = 0.3):
+        self.std = std
+        self.p = p
+
+    def __call__(self, tensor):
+        if random.random() < self.p:
+            return tensor + torch.randn_like(tensor) * self.std
+        return tensor
 
 
 class MTASwinModel(nn.Module):
@@ -292,27 +339,36 @@ def read_cls_dataframe(cls_path: Path, image_dir: Path) -> pd.DataFrame:
     return df
 
 
-def build_transforms(config: MMOTUConfig):
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize(config.target_size, antialias=True),
+def build_transforms(config: MMOTUConfig, aug: str = "default"):
+    size = config.target_size
+    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    normalize = transforms.Normalize(mean=mean, std=std)
+
+    if aug == "none":
+        train_ops = [transforms.Resize(size, antialias=True), transforms.ToTensor(), normalize]
+    elif aug == "strong":
+        # Heavier, ultrasound-flavored augmentation.
+        train_ops = [
+            transforms.RandomResizedCrop(size, scale=(0.7, 1.0), ratio=(0.8, 1.25), antialias=True),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomAffine(degrees=15, translate=(0.08, 0.08), scale=(0.9, 1.1)),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 1.5))], p=0.3),
+            transforms.ToTensor(),
+            normalize,
+            AddGaussianNoise(std=0.03, p=0.3),  # speckle-like
+        ]
+    else:  # "default" -- original mild augmentation
+        train_ops = [
+            transforms.Resize(size, antialias=True),
             transforms.RandomAffine(degrees=5, translate=(0.05, 0.05), scale=(0.95, 1.05)),
-            transforms.RandomApply(
-                [transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 1.0))],
-                p=0.3,
-            ),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 1.0))], p=0.3),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            normalize,
         ]
-    )
-    eval_transform = transforms.Compose(
-        [
-            transforms.Resize(config.target_size, antialias=True),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-    return train_transform, eval_transform
+
+    eval_transform = transforms.Compose([transforms.Resize(size, antialias=True), transforms.ToTensor(), normalize])
+    return transforms.Compose(train_ops), eval_transform
 
 
 def set_all_seeds(seed: int) -> None:
@@ -586,6 +642,26 @@ def main():
         help="Random seed for the split and all RNGs (default: config / 42). "
         "Vary over 0/1/2 for multi-seed statistics.",
     )
+    parser.add_argument(
+        "--sampler",
+        choices=["none", "balanced"],
+        default="none",
+        help="Training sampler: 'none' (shuffle) or 'balanced' (WeightedRandomSampler "
+        "that oversamples minority classes).",
+    )
+    parser.add_argument(
+        "--roi",
+        choices=["none", "crop", "mask"],
+        default="none",
+        help="Use the tumor mask to crop to the lesion bbox ('crop') or also zero out "
+        "the background ('mask'). Applied to train/val/test consistently.",
+    )
+    parser.add_argument(
+        "--aug",
+        choices=["default", "strong", "none"],
+        default="default",
+        help="Training augmentation preset (eval is always resize+normalize).",
+    )
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
@@ -599,6 +675,9 @@ def main():
     focal_gamma = args.focal_gamma if args.focal_gamma is not None else config.focal_gamma
     no_val = args.no_val
     seed = args.seed if args.seed is not None else config.seed
+    sampler_type = args.sampler
+    roi_mode = args.roi
+    aug = args.aug
 
     # Descriptive run tag so different configs never overwrite each other's outputs.
     tag_parts = [sanitize_name(args.model), args.mode]
@@ -609,6 +688,12 @@ def main():
         tag_parts.append(selection_metric)
         if abs(val_split - 0.2) > 1e-9:
             tag_parts.append(f"v{int(round(val_split * 100))}")
+    if roi_mode != "none":
+        tag_parts.append(f"roi{roi_mode}")
+    if aug != "default":
+        tag_parts.append(f"aug{aug}")
+    if sampler_type != "none":
+        tag_parts.append("samp")
     if loss_type == "focal":
         tag_parts.append(f"focal{focal_gamma:g}")
     if use_class_weights:
@@ -628,6 +713,9 @@ def main():
     print(f"Seed:             {seed}")
     print(f"Loss:             {'focal (gamma=%g)' % focal_gamma if loss_type == 'focal' else 'cross-entropy'}")
     print(f"Class weights:    {use_class_weights}")
+    print(f"Sampler:          {sampler_type}")
+    print(f"ROI:              {roi_mode}" + (f" (masks: {config.mask_dir})" if roi_mode != "none" else ""))
+    print(f"Augmentation:     {aug}")
     if no_val:
         print(f"Validation:       DISABLED (full pool, fixed {num_epochs} epochs, cosine LR)")
     else:
@@ -653,18 +741,36 @@ def main():
         )
         print(f"Split: train={len(train_df)} | val={len(val_df)} | test={len(test_df)}\n")
 
-    train_transform, eval_transform = build_transforms(config)
-    train_loader = DataLoader(
-        ImageDataset(train_df, train_transform), batch_size=config.batch_size, shuffle=True,
-        num_workers=config.num_workers, pin_memory=config.pin_memory,
-    )
+    train_transform, eval_transform = build_transforms(config, aug=aug)
+    roi_kw = dict(roi_mode=roi_mode, mask_dir=config.mask_dir)
+    train_ds = ImageDataset(train_df, train_transform, **roi_kw)
+
+    # Balanced sampler oversamples minority classes (mutually exclusive with shuffle).
+    if sampler_type == "balanced":
+        counts = train_df["label"].value_counts().reindex(range(config.num_classes), fill_value=0).sort_index()
+        counts = np.maximum(counts.to_numpy(), 1)
+        per_sample_w = (1.0 / counts)[train_df["label"].to_numpy()]
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(per_sample_w, dtype=torch.double),
+            num_samples=len(train_df),
+            replacement=True,
+        )
+        train_loader = DataLoader(
+            train_ds, batch_size=config.batch_size, sampler=sampler,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=config.batch_size, shuffle=True,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+        )
     if not no_val:
         val_loader = DataLoader(
-            ImageDataset(val_df, eval_transform), batch_size=config.batch_size, shuffle=False,
+            ImageDataset(val_df, eval_transform, **roi_kw), batch_size=config.batch_size, shuffle=False,
             num_workers=config.num_workers, pin_memory=config.pin_memory,
         )
     test_loader = DataLoader(
-        ImageDataset(test_df, eval_transform), batch_size=config.batch_size, shuffle=False,
+        ImageDataset(test_df, eval_transform, **roi_kw), batch_size=config.batch_size, shuffle=False,
         num_workers=config.num_workers, pin_memory=config.pin_memory,
     )
 
@@ -793,6 +899,9 @@ def main():
         "Selection Metric": "-" if no_val else selection_metric,
         "Val Split": 0.0 if no_val else round(val_split, 3),
         "No Val": no_val,
+        "Sampler": sampler_type,
+        "ROI": roi_mode,
+        "Aug": aug,
         "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
         "Balanced Accuracy (%)": round(bal_acc * 100, 3),

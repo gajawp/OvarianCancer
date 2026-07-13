@@ -119,6 +119,32 @@ too many without early stopping). All variants compose with `--model` and are
 reflected in the run tag (e.g. `MTA-Swin_pretrained_noval_e50_s42`,
 `MTA-Swin_pretrained_accuracy_v5_s42`).
 
+### Sampling / ROI / augmentation (data-pipeline levers)
+
+Three orthogonal, opt-in switches (no architecture change); all compose and are
+encoded in the run tag.
+
+```bash
+# 1) balanced sampling (WeightedRandomSampler oversamples minority classes)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced
+
+# 2) ROI: crop to the tumor bbox from the binary mask ("crop"), or also zero the
+#    background ("mask"). Applied identically to train/val/test.
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi crop
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi mask
+
+# 3) augmentation preset: default (mild) | strong (RandomResizedCrop + flip +
+#    ColorJitter + blur + speckle-like noise) | none
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --aug strong
+
+# combine freely
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --roi crop --aug strong --sampler balanced
+```
+
+`--roi` needs the masks in `OTU_2d/annotations/<id>_binary.PNG` (override dir via
+`MMOTU_MASK_DIR`). Images with a missing/empty mask fall back to the full image.
+Tags look like `MTA-Swin_pretrained_noval_e100_roicrop_augstrong_samp_s42`.
+
 ### Multi-seed statistics & epoch sweep
 
 `--seed` overrides the RNG/split seed (default 42) and is encoded in the run
