@@ -5,8 +5,9 @@ Train and evaluate MTA-Swin (ImageNet-1K pretrained) on MMOTU OTU_2d
 Data: MMOTU provides a flat image folder plus label files
     train_cls.txt / val_cls.txt   (each line:  "<name>.JPG  <label 0-7>")
 Split: train_cls.txt is the training pool -> stratified 80/20 into train/val
-       (seed 42) for early stopping / LR scheduling; val_cls.txt is the fixed
-       held-out test set (this is the paper's official 1000/469 split).
+       (seed configurable via --seed, default 42) for early stopping / LR
+       scheduling; val_cls.txt is the fixed held-out test set (the paper's
+       official 1000/469 split).
 
 Model: MTA-Swin (pretrained) by default; --model / --mode select any of the
 comparison baselines (ResNet-50, Swin-T, ...) for pipeline sanity checks. Run:
@@ -578,6 +579,13 @@ def main():
         help="Paper-style: no validation split; train on the full pool for a fixed "
         "number of epochs (cosine LR, no early stopping) and evaluate the final model.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for the split and all RNGs (default: config / 42). "
+        "Vary over 0/1/2 for multi-seed statistics.",
+    )
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
@@ -590,11 +598,13 @@ def main():
     loss_type = args.loss
     focal_gamma = args.focal_gamma if args.focal_gamma is not None else config.focal_gamma
     no_val = args.no_val
+    seed = args.seed if args.seed is not None else config.seed
 
     # Descriptive run tag so different configs never overwrite each other's outputs.
     tag_parts = [sanitize_name(args.model), args.mode]
     if no_val:
         tag_parts.append("noval")
+        tag_parts.append(f"e{num_epochs}")  # fixed budget is the experiment variable
     else:
         tag_parts.append(selection_metric)
         if abs(val_split - 0.2) > 1e-9:
@@ -603,6 +613,7 @@ def main():
         tag_parts.append(f"focal{focal_gamma:g}")
     if use_class_weights:
         tag_parts.append("cw")
+    tag_parts.append(f"s{seed}")
     run_tag = "_".join(tag_parts)
     model_display = f"{args.model} ({args.mode})"
 
@@ -614,7 +625,7 @@ def main():
     print(f"Val (test) cls:   {config.val_cls_path}")
     if args.model == "MTA-Swin" and args.mode == "pretrained":
         print(f"Pretrained wts:   {config.pretrained_weights_path}")
-    print(f"Seed:             {config.seed}")
+    print(f"Seed:             {seed}")
     print(f"Loss:             {'focal (gamma=%g)' % focal_gamma if loss_type == 'focal' else 'cross-entropy'}")
     print(f"Class weights:    {use_class_weights}")
     if no_val:
@@ -623,7 +634,7 @@ def main():
         print(f"Validation split: {val_split:.2f} | selection metric: {selection_metric}")
     print(f"Run tag:          {run_tag}\n")
 
-    set_all_seeds(config.seed)
+    set_all_seeds(seed)
 
     # ---- data ----
     full_train_df = read_cls_dataframe(config.train_cls_path, config.image_dir)
@@ -637,7 +648,7 @@ def main():
         train_df, val_df = train_test_split(
             full_train_df,
             test_size=val_split,
-            random_state=config.seed,
+            random_state=seed,
             stratify=full_train_df["label"],
         )
         print(f"Split: train={len(train_df)} | val={len(val_df)} | test={len(test_df)}\n")
@@ -658,7 +669,7 @@ def main():
     )
 
     # ---- model ----
-    set_all_seeds(config.seed)
+    set_all_seeds(seed)
     model = build_model(args.model, args.mode, config).to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}\n")
@@ -777,7 +788,7 @@ def main():
 
     summary_row = {
         "Model": model_display,
-        "Seed": config.seed,
+        "Seed": seed,
         "Loss": f"focal(g={focal_gamma:g})" if loss_type == "focal" else "ce",
         "Selection Metric": "-" if no_val else selection_metric,
         "Val Split": 0.0 if no_val else round(val_split, 3),

@@ -116,8 +116,31 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 50
 Notes: `--no-val` ignores `--selection-metric` / `--val-split` and always trains
 exactly `--epochs` epochs, so set `--epochs` explicitly (default 200 is likely
 too many without early stopping). All variants compose with `--model` and are
-reflected in the run tag (e.g. `MTA-Swin_pretrained_noval_focal2`,
-`MTA-Swin_pretrained_accuracy_v5`).
+reflected in the run tag (e.g. `MTA-Swin_pretrained_noval_e50_s42`,
+`MTA-Swin_pretrained_accuracy_v5_s42`).
+
+### Multi-seed statistics & epoch sweep
+
+`--seed` overrides the RNG/split seed (default 42) and is encoded in the run
+tag (`_s0`), so multi-seed runs never collide. In `--no-val` mode the epoch
+budget is also in the tag (`_e50`), so an epoch sweep stays separable.
+
+```bash
+# multi-seed (report mean +/- std over 0/1/2)
+for s in 0 1 2; do
+  python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 50 --seed $s
+done
+
+# fair Swin-T comparison under the same protocol
+for s in 0 1 2; do
+  python experiments/mmotu_cls/run_mmotu_mta_swin.py --model Swin-T --no-val --epochs 50 --seed $s
+done
+
+# epoch sweep (fixed-budget no-val)
+for e in 25 50 75 100; do
+  python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs $e
+done
+```
 
 ## Outputs (`experiments/mmotu_cls/outputs/`)
 
