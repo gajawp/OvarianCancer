@@ -91,10 +91,16 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50 --pretrain 
 Weights load from `RADIMAGENET_RESNET50` (local path) if set, else are pulled
 from the HuggingFace port `Lab-Rasool/RadImageNet` (`ResNet50.pt`). The startup
 log prints matched/missing tensors — check the backbone actually loaded.
-Normalization stays ImageNet mean/std (per that port). Note: RadImageNet is
-CT/MRI/US **mixed** (not ultrasound-only), and its original Keras models used
-`/255`-only preprocessing — if transfer looks off, that's the first thing to try.
-Tag: `ResNet-50_radimagenet_...`.
+Normalization defaults to ImageNet mean/std (per that port). RadImageNet's
+original Keras models used `/255`-only preprocessing, so if transfer looks off,
+re-run with `--norm unit` (/255 only, no mean/std):
+
+```bash
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50 --pretrain radimagenet --norm unit --no-val --epochs 100
+```
+
+Note: RadImageNet is CT/MRI/US **mixed** (not ultrasound-only). Tags:
+`ResNet-50_radimagenet_...` (+`_normunit` when `--norm unit`).
 
 ### Imbalance handling (optional)
 

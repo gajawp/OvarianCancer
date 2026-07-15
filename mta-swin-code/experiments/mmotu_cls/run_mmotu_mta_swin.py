@@ -384,9 +384,14 @@ def read_cls_dataframe(cls_path: Path, image_dir: Path) -> pd.DataFrame:
     return df
 
 
-def build_transforms(config: MMOTUConfig, aug: str = "default"):
+def build_transforms(config: MMOTUConfig, aug: str = "default", norm: str = "imagenet"):
     size = config.target_size
-    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    if norm == "unit":
+        # /255-only (ToTensor already scales to [0,1]); matches RadImageNet's
+        # original rescale=1/255 Keras preprocessing.
+        mean, std = [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+    else:
+        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]  # ImageNet
     normalize = transforms.Normalize(mean=mean, std=std)
 
     # All presets keep the WHOLE image (Resize, never RandomResizedCrop) so the
@@ -753,6 +758,13 @@ def main():
         "only supported for --model ResNet-50; everything else uses ImageNet.",
     )
     parser.add_argument(
+        "--norm",
+        choices=["imagenet", "unit"],
+        default="imagenet",
+        help="Input normalization: 'imagenet' mean/std (default) or 'unit' (/255 only, "
+        "no mean/std). Use 'unit' for RadImageNet weights (original Keras rescale=1/255).",
+    )
+    parser.add_argument(
         "--mixup",
         action="store_true",
         help="Enable MixUp/CutMix (timm), synthesizing new samples by mixing images "
@@ -784,6 +796,7 @@ def main():
     aug = args.aug
     use_mixup = args.mixup
     pretrain = args.pretrain
+    norm = args.norm
     if pretrain == "radimagenet" and args.model != "ResNet-50":
         parser.error("--pretrain radimagenet is only supported with --model ResNet-50")
 
@@ -802,6 +815,8 @@ def main():
         tag_parts.append(f"roi{roi_mode}")
     if aug != "default":
         tag_parts.append(f"aug{aug}")
+    if norm != "imagenet":
+        tag_parts.append(f"norm{norm}")
     if use_mixup:
         tag_parts.append("mixup")
     if sampler_type != "none":
@@ -828,6 +843,7 @@ def main():
     print(f"Sampler:          {sampler_type}" + (f" (beta={sampler_beta:g})" if sampler_type != "none" else ""))
     print(f"ROI:              {roi_mode}" + (f" (masks: {config.mask_dir})" if roi_mode != "none" else ""))
     print(f"Augmentation:     {aug}")
+    print(f"Normalization:    {norm}")
     print(f"MixUp/CutMix:     {use_mixup}" + (f" (mixup_a={args.mixup_alpha:g}, cutmix_a={args.cutmix_alpha:g})" if use_mixup else ""))
     if no_val:
         print(f"Validation:       DISABLED (full pool, fixed {num_epochs} epochs, cosine LR)")
@@ -854,7 +870,7 @@ def main():
         )
         print(f"Split: train={len(train_df)} | val={len(val_df)} | test={len(test_df)}\n")
 
-    train_transform, eval_transform = build_transforms(config, aug=aug)
+    train_transform, eval_transform = build_transforms(config, aug=aug, norm=norm)
     roi_kw = dict(roi_mode=roi_mode, mask_dir=config.mask_dir)
     train_ds = ImageDataset(train_df, train_transform, **roi_kw)
 
@@ -1043,6 +1059,7 @@ def main():
         "Sampler": sampler_type if sampler_type == "none" else f"{sampler_type}(b={sampler_beta:g})",
         "ROI": roi_mode,
         "Aug": aug,
+        "Norm": norm,
         "MixUp": use_mixup,
         "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
