@@ -1,0 +1,2 @@
+Model,Seed,Loss,Selection Metric,Val Split,No Val,Sampler,ROI,Aug,Norm,MixUp,Class Weights,Accuracy (%),Balanced Accuracy (%),Macro F1 (%),Macro Precision (%),Macro Sensitivity (%),Macro Specificity (%),MCC,ROC-AUC (%),Parameters,Misclassified (n/total)
+ResNet-50 (radimagenet),42,ce,-,0.0,True,none,none,default,unit,False,False,68.657,59.481,61.428,65.208,59.481,95.246,0.6182,91.17,23524424,147/469
