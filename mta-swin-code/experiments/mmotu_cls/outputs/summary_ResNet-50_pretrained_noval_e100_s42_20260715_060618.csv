@@ -1,0 +1,2 @@
+Model,Seed,Loss,Selection Metric,Val Split,No Val,Sampler,ROI,Aug,MixUp,Class Weights,Accuracy (%),Balanced Accuracy (%),Macro F1 (%),Macro Precision (%),Macro Sensitivity (%),Macro Specificity (%),MCC,ROC-AUC (%),Parameters,Misclassified (n/total)
+ResNet-50 (pretrained),42,ce,-,0.0,True,none,none,default,False,False,74.414,64.834,66.88,72.018,64.834,96.16,0.6908,91.562,23524424,120/469
