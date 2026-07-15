@@ -246,9 +246,54 @@ class CustomCNN(nn.Module):
         return self.classifier(self.features(x))
 
 
-def create_torchvision_model(model_name: str, num_classes: int, pretrained: bool):
+def load_radimagenet_resnet50(num_classes: int) -> nn.Module:
+    """ResNet-50 initialized from RadImageNet (1.35M CT/MRI/ULTRASOUND images),
+    with a fresh classification head. Weights come from a local checkpoint
+    (env RADIMAGENET_RESNET50) or the HuggingFace port Lab-Rasool/RadImageNet
+    (ResNet50.pt). Preprocessing stays ImageNet mean/std, per that port's card."""
+    import os
+
+    ckpt = os.environ.get("RADIMAGENET_RESNET50")
+    if not ckpt:
+        from huggingface_hub import hf_hub_download
+
+        ckpt = hf_hub_download(repo_id="Lab-Rasool/RadImageNet", filename="ResNet50.pt")
+    print(f"Loading RadImageNet ResNet-50 weights from: {ckpt}")
+
+    # Full-model pickle needs weights_only=False (torch>=2.6 defaults to True).
+    obj = torch.load(ckpt, map_location="cpu", weights_only=False)
+    if isinstance(obj, nn.Module):
+        state_dict = obj.state_dict()
+    elif isinstance(obj, dict):
+        state_dict = obj.get("state_dict", obj.get("model", obj))
+    else:
+        raise TypeError(f"Unexpected RadImageNet checkpoint type: {type(obj)}")
+
+    # Strip a possible DataParallel prefix and the classifier head.
+    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("fc.")}
+
+    model = models.resnet50(weights=None)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    matched = len(state_dict) - len(incompatible.unexpected_keys)
+    print(
+        f"  matched backbone tensors: {matched}/{len(state_dict)} | "
+        f"missing: {len(incompatible.missing_keys)} | unexpected: {len(incompatible.unexpected_keys)}"
+    )
+    if matched < 100:
+        print(
+            "  [WARNING] very few RadImageNet weights matched torchvision ResNet-50 — the "
+            "checkpoint layout may differ (check the source/port); transfer will be ineffective."
+        )
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+
+def create_torchvision_model(model_name: str, num_classes: int, pretrained: bool, pretrain: str = "imagenet"):
     """Build a comparison-baseline model (torchvision or timm) with a fresh head."""
     if model_name == "ResNet-50":
+        if pretrain == "radimagenet":
+            return load_radimagenet_resnet50(num_classes)
         model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT if pretrained else None)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
         return model
@@ -291,13 +336,13 @@ AVAILABLE_MODELS = (
 )
 
 
-def build_model(model_name: str, mode: str, config: MMOTUConfig) -> nn.Module:
+def build_model(model_name: str, mode: str, config: MMOTUConfig, pretrain: str = "imagenet") -> nn.Module:
     pretrained = mode == "pretrained"
     if model_name == "MTA-Swin":
         return MTASwinModel(config, pretrained=pretrained)
     if model_name == "Custom CNN":
         return CustomCNN(num_classes=config.num_classes)  # always from scratch
-    return create_torchvision_model(model_name, config.num_classes, pretrained=pretrained)
+    return create_torchvision_model(model_name, config.num_classes, pretrained=pretrained, pretrain=pretrain)
 
 
 class FocalLoss(nn.Module):
@@ -701,6 +746,13 @@ def main():
         "medium/strong are lesion-preserving (no RandomResizedCrop).",
     )
     parser.add_argument(
+        "--pretrain",
+        choices=["imagenet", "radimagenet"],
+        default="imagenet",
+        help="Pretrained-weight source. 'radimagenet' (medical, incl. ultrasound) is "
+        "only supported for --model ResNet-50; everything else uses ImageNet.",
+    )
+    parser.add_argument(
         "--mixup",
         action="store_true",
         help="Enable MixUp/CutMix (timm), synthesizing new samples by mixing images "
@@ -731,9 +783,14 @@ def main():
     roi_mode = args.roi
     aug = args.aug
     use_mixup = args.mixup
+    pretrain = args.pretrain
+    if pretrain == "radimagenet" and args.model != "ResNet-50":
+        parser.error("--pretrain radimagenet is only supported with --model ResNet-50")
 
     # Descriptive run tag so different configs never overwrite each other's outputs.
-    tag_parts = [sanitize_name(args.model), args.mode]
+    # For radimagenet, the source replaces the mode slot in the tag/name.
+    mode_tag = "radimagenet" if pretrain == "radimagenet" else args.mode
+    tag_parts = [sanitize_name(args.model), mode_tag]
     if no_val:
         tag_parts.append("noval")
         tag_parts.append(f"e{num_epochs}")  # fixed budget is the experiment variable
@@ -755,7 +812,7 @@ def main():
         tag_parts.append("cw")
     tag_parts.append(f"s{seed}")
     run_tag = "_".join(tag_parts)
-    model_display = f"{args.model} ({args.mode})"
+    model_display = f"{args.model} ({mode_tag})"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -835,7 +892,7 @@ def main():
 
     # ---- model ----
     set_all_seeds(seed)
-    model = build_model(args.model, args.mode, config).to(device)
+    model = build_model(args.model, args.mode, config, pretrain=pretrain).to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}\n")
 

@@ -76,6 +76,26 @@ Accepted `--model`: `MTA-Swin` (default), `ResNet-50`, `EfficientNet-B4`,
 use (torchvision / timm) — needs internet or a warm cache on the server.
 Each run's outputs/checkpoint are tagged `<model>_<mode>_<selection><_cw>`.
 
+### Medical pretraining: RadImageNet ResNet-50
+
+`--pretrain radimagenet` (only with `--model ResNet-50`) initializes ResNet-50
+from RadImageNet (1.35M CT/MRI/**ultrasound** images) instead of ImageNet, to
+test whether in-domain (medical) pretraining helps vs ImageNet.
+
+```bash
+# ImageNet vs RadImageNet, same protocol (controlled pair)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50 --no-val --epochs 100
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --model ResNet-50 --pretrain radimagenet --no-val --epochs 100
+```
+
+Weights load from `RADIMAGENET_RESNET50` (local path) if set, else are pulled
+from the HuggingFace port `Lab-Rasool/RadImageNet` (`ResNet50.pt`). The startup
+log prints matched/missing tensors — check the backbone actually loaded.
+Normalization stays ImageNet mean/std (per that port). Note: RadImageNet is
+CT/MRI/US **mixed** (not ultrasound-only), and its original Keras models used
+`/255`-only preprocessing — if transfer looks off, that's the first thing to try.
+Tag: `ResNet-50_radimagenet_...`.
+
 ### Imbalance handling (optional)
 
 Defaults reproduce the original run (accuracy-based early stopping, no class
