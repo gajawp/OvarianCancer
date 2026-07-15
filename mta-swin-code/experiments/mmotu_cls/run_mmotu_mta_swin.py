@@ -269,9 +269,23 @@ def load_radimagenet_resnet50(num_classes: int) -> nn.Module:
     else:
         raise TypeError(f"Unexpected RadImageNet checkpoint type: {type(obj)}")
 
-    # Strip a possible DataParallel prefix and the classifier head.
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    state_dict = {k: v for k, v in state_dict.items() if not k.startswith("fc.")}
+    raw = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+    # This HF port stores an nn.Sequential feature extractor built from
+    # torchvision resnet50.children()[:8], with keys like
+    # "backbone.4.0.conv1.weight". Remap the Sequential indices back to the
+    # torchvision resnet50 names (indices 2/3 = relu/maxpool have no params).
+    if any(k.startswith("backbone.") for k in raw):
+        seq_to_resnet = {"0": "conv1", "1": "bn1", "4": "layer1", "5": "layer2", "6": "layer3", "7": "layer4"}
+        state_dict = {}
+        for k, v in raw.items():
+            if not k.startswith("backbone."):
+                continue
+            parts = k.split(".")
+            if parts[1] in seq_to_resnet:
+                state_dict[seq_to_resnet[parts[1]] + "." + ".".join(parts[2:])] = v
+    else:
+        state_dict = {k: v for k, v in raw.items() if not k.startswith("fc.")}
 
     model = models.resnet50(weights=None)
     incompatible = model.load_state_dict(state_dict, strict=False)
