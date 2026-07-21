@@ -1,15 +1,14 @@
-
 import csv
 import random
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from common.dataset import (
     OvarianDataset,
-    get_train_transform
+    get_train_transform,
 )
 
 
@@ -19,15 +18,14 @@ from common.dataset import (
 
 def set_random_seed(seed):
     """
-    Sets random seeds for reproducible experiments.
+    Set random seeds for reproducible experiments.
 
     This affects:
-
     - Python random operations
     - NumPy operations
     - PyTorch model initialization
     - CUDA operations
-    - Dataset train-validation splitting
+    - DataLoader shuffling
 
     Parameters
     ----------
@@ -36,167 +34,252 @@ def set_random_seed(seed):
     """
 
     random.seed(seed)
-
     np.random.seed(seed)
-
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    # These settings improve reproducibility on CUDA.
-    # They may slightly reduce training speed.
     if torch.backends.cudnn.is_available():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
 
 # ==========================================================
-# Dataset Split
+# Official Split Verification
 # ==========================================================
 
-def create_split_indices(
-    dataset_size,
-    train_split,
-    random_seed
+def verify_no_split_overlap(
+    train_dataset,
+    test_dataset,
 ):
     """
-    Creates reproducible training and validation indices.
-
-    The same split must be used for all models so that model
-    comparisons remain fair.
+    Verify that no image filename appears in both the
+    official training and testing datasets.
 
     Parameters
     ----------
-    dataset_size : int
-        Total number of samples.
+    train_dataset : OvarianDataset
+        Dataset created from train_cls.txt.
 
-    train_split : float
-        Fraction of data used for training.
+    test_dataset : OvarianDataset
+        Dataset created from val_cls.txt.
 
-        Example:
-        0.8 means 80% training and 20% validation.
-
-    random_seed : int
-        Seed used for shuffling dataset indices.
-
-    Returns
-    -------
-    tuple
-        train_indices, validation_indices
+    Raises
+    ------
+    RuntimeError
+        If one or more filenames occur in both partitions.
     """
 
-    if dataset_size <= 1:
-        raise ValueError(
-            "The dataset must contain at least two samples."
-        )
-
-    if not 0.0 < train_split < 1.0:
-        raise ValueError(
-            "TRAIN_SPLIT must be between 0 and 1."
-        )
-
-    generator = torch.Generator().manual_seed(
-        random_seed
+    train_images = set(
+        train_dataset.images
     )
 
-    indices = torch.randperm(
-        dataset_size,
-        generator=generator
-    ).tolist()
-
-    train_size = int(
-        train_split * dataset_size
+    test_images = set(
+        test_dataset.images
     )
 
-    # Ensure both splits contain at least one image.
-    train_size = max(
-        1,
-        min(
-            train_size,
-            dataset_size - 1
+    duplicate_train_entries = (
+        len(train_dataset.images)
+        - len(train_images)
+    )
+
+    duplicate_test_entries = (
+        len(test_dataset.images)
+        - len(test_images)
+    )
+
+    if duplicate_train_entries > 0:
+        raise RuntimeError(
+            "Duplicate filenames were found inside "
+            f"the training split: "
+            f"{duplicate_train_entries} duplicate entries."
         )
+
+    if duplicate_test_entries > 0:
+        raise RuntimeError(
+            "Duplicate filenames were found inside "
+            f"the testing split: "
+            f"{duplicate_test_entries} duplicate entries."
+        )
+
+    overlap = train_images.intersection(
+        test_images
     )
 
-    train_indices = indices[:train_size]
+    if overlap:
+        overlap_preview = sorted(
+            overlap
+        )[:10]
 
-    validation_indices = indices[train_size:]
+        raise RuntimeError(
+            "Data leakage detected. "
+            f"{len(overlap)} image filenames appear in both "
+            "the training and testing partitions. "
+            f"Examples: {overlap_preview}"
+        )
 
-    return (
-        train_indices,
-        validation_indices
+    print(
+        "Official split verification passed."
+    )
+
+    print(
+        "Training images:",
+        len(train_images),
+    )
+
+    print(
+        "Testing images:",
+        len(test_images),
+    )
+
+    print(
+        "Overlapping filenames: 0"
     )
 
 
 # ==========================================================
-# Train and Validation DataLoaders
+# Dataset File Verification
+# ==========================================================
+
+def verify_dataset_files(dataset):
+    """
+    Verify that every image and corresponding mask listed
+    in a dataset exists.
+
+    The expected mask naming format is:
+
+        image:  658.JPG
+        mask:   658_binary.PNG
+
+    Parameters
+    ----------
+    dataset : OvarianDataset
+        Segmentation dataset to verify.
+
+    Raises
+    ------
+    FileNotFoundError
+        If an image or mask does not exist.
+    """
+
+    missing_images = []
+    missing_masks = []
+
+    for image_name in dataset.images:
+        image_path = (
+            Path(dataset.image_dir)
+            / image_name
+        )
+
+        base_name = Path(
+            image_name
+        ).stem
+
+        mask_name = (
+            base_name
+            + "_binary.PNG"
+        )
+
+        mask_path = (
+            Path(dataset.mask_dir)
+            / mask_name
+        )
+
+        if not image_path.exists():
+            missing_images.append(
+                str(image_path)
+            )
+
+        if not mask_path.exists():
+            missing_masks.append(
+                str(mask_path)
+            )
+
+    if missing_images or missing_masks:
+        error_messages = []
+
+        if missing_images:
+            error_messages.append(
+                f"{len(missing_images)} images are missing. "
+                f"Examples: {missing_images[:5]}"
+            )
+
+        if missing_masks:
+            error_messages.append(
+                f"{len(missing_masks)} masks are missing. "
+                f"Examples: {missing_masks[:5]}"
+            )
+
+        raise FileNotFoundError(
+            "\n".join(error_messages)
+        )
+
+
+# ==========================================================
+# Train and Test DataLoaders
 # ==========================================================
 
 def create_data_loaders(config):
     """
-    Creates training and validation DataLoaders.
+    Create segmentation training and testing DataLoaders
+    from the official dataset split.
 
-    Training data uses augmentation.
+    train_cls.txt is used for training.
+    val_cls.txt is used as the official held-out test set.
 
-    Validation data does not use augmentation.
+    Training images use data augmentation.
+    Test images do not use augmentation.
 
-    Both datasets use the same reproducible split.
-
-    Parameters
-    ----------
-    config : module
-        The common.config module.
+    Required configuration values
+    -----------------------------
+    config.IMAGE_DIR
+    config.MASK_DIR
+    config.TRAIN_LIST_PATH
+    config.TEST_LIST_PATH
+    config.IMAGE_SIZE
+    config.BATCH_SIZE
+    config.NUM_WORKERS
+    config.DEVICE
 
     Returns
     -------
     tuple
-        train_loader, validation_loader
+        train_loader, test_loader
     """
 
-    train_full_dataset = OvarianDataset(
+    train_dataset = OvarianDataset(
         image_dir=config.IMAGE_DIR,
         mask_dir=config.MASK_DIR,
+        split_file=config.TRAIN_LIST_PATH,
         image_size=config.IMAGE_SIZE,
-        transform=get_train_transform()
+        transform=get_train_transform(),
     )
 
-    validation_full_dataset = OvarianDataset(
+    test_dataset = OvarianDataset(
         image_dir=config.IMAGE_DIR,
         mask_dir=config.MASK_DIR,
+        split_file=config.TEST_LIST_PATH,
         image_size=config.IMAGE_SIZE,
-        transform=None
+        transform=None,
     )
 
-    if (
-        len(train_full_dataset)
-        != len(validation_full_dataset)
-    ):
-        raise RuntimeError(
-            "Training and validation dataset sizes do not match."
-        )
-
-    (
-        train_indices,
-        validation_indices
-    ) = create_split_indices(
-        dataset_size=len(train_full_dataset),
-        train_split=config.TRAIN_SPLIT,
-        random_seed=config.RANDOM_SEED
+    verify_dataset_files(
+        train_dataset
     )
 
-    train_dataset = Subset(
-        train_full_dataset,
-        train_indices
+    verify_dataset_files(
+        test_dataset
     )
 
-    validation_dataset = Subset(
-        validation_full_dataset,
-        validation_indices
+    verify_no_split_overlap(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
     )
 
     pin_memory = (
-        config.DEVICE == "cuda"
+        str(config.DEVICE) == "cuda"
     )
 
     train_loader = DataLoader(
@@ -204,37 +287,44 @@ def create_data_loaders(config):
         batch_size=config.BATCH_SIZE,
         shuffle=True,
         num_workers=config.NUM_WORKERS,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        persistent_workers=(
+            config.NUM_WORKERS > 0
+        ),
     )
 
-    validation_loader = DataLoader(
-        validation_dataset,
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
         num_workers=config.NUM_WORKERS,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        persistent_workers=(
+            config.NUM_WORKERS > 0
+        ),
     )
 
     return (
         train_loader,
-        validation_loader
+        test_loader,
     )
 
 
 # ==========================================================
-# Evaluation DataLoader
+# Official Test DataLoader
 # ==========================================================
 
-def create_validation_loader(
+def create_test_loader(
     config,
-    batch_size=1
+    batch_size=1,
 ):
     """
-    Creates only the validation DataLoader.
+    Create a DataLoader for the official test partition.
 
-    This function uses exactly the same split as training.
+    This function is intended for evaluate.py.
 
-    It is normally used by evaluate.py.
+    The test partition is read from val_cls.txt and does
+    not use random augmentation.
 
     Parameters
     ----------
@@ -242,53 +332,65 @@ def create_validation_loader(
         The common.config module.
 
     batch_size : int
-        Evaluation batch size.
-
-        A batch size of 1 is useful when saving one
-        qualitative result for each image.
+        Number of test images per batch.
 
     Returns
     -------
     DataLoader
-        Validation DataLoader.
+        Official test DataLoader.
     """
 
-    validation_full_dataset = OvarianDataset(
+    test_dataset = OvarianDataset(
         image_dir=config.IMAGE_DIR,
         mask_dir=config.MASK_DIR,
+        split_file=config.TEST_LIST_PATH,
         image_size=config.IMAGE_SIZE,
-        transform=None
+        transform=None,
     )
 
-    (
-        _,
-        validation_indices
-    ) = create_split_indices(
-        dataset_size=len(
-            validation_full_dataset
-        ),
-        train_split=config.TRAIN_SPLIT,
-        random_seed=config.RANDOM_SEED
-    )
-
-    validation_dataset = Subset(
-        validation_full_dataset,
-        validation_indices
+    verify_dataset_files(
+        test_dataset
     )
 
     pin_memory = (
-        config.DEVICE == "cuda"
+        str(config.DEVICE) == "cuda"
     )
 
-    validation_loader = DataLoader(
-        validation_dataset,
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=config.NUM_WORKERS,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        persistent_workers=(
+            config.NUM_WORKERS > 0
+        ),
     )
 
-    return validation_loader
+    return test_loader
+
+
+# ==========================================================
+# Backward-Compatible Evaluation Loader
+# ==========================================================
+
+def create_validation_loader(
+    config,
+    batch_size=1,
+):
+    """
+    Backward-compatible wrapper for older evaluation files.
+
+    The returned data now comes from the official test
+    partition specified by config.TEST_LIST_PATH.
+
+    New evaluation scripts should use create_test_loader().
+    """
+
+    return create_test_loader(
+        config=config,
+        batch_size=batch_size,
+    )
 
 
 # ==========================================================
@@ -298,25 +400,24 @@ def create_validation_loader(
 def append_result(
     csv_path,
     model_name,
-    metrics
+    metrics,
 ):
     """
-    Adds or updates a model's evaluation result in a CSV file.
+    Add or update one model's segmentation results.
 
-    If the model already exists in the CSV, its previous row
-    is replaced instead of creating a duplicate row.
+    If the model already exists in the CSV, its previous
+    result is replaced.
 
     Parameters
     ----------
     csv_path : str or pathlib.Path
-        Path to the model comparison CSV file.
+        Model-comparison CSV path.
 
     model_name : str
-        Name of the evaluated model.
+        Name of the segmentation model.
 
     metrics : dict
-        Dictionary containing:
-
+        Expected keys:
         - dice
         - iou
         - precision
@@ -325,11 +426,13 @@ def append_result(
         - hausdorff_distance
     """
 
-    csv_path = Path(csv_path)
+    csv_path = Path(
+        csv_path
+    )
 
     csv_path.parent.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
     required_metrics = [
@@ -338,7 +441,7 @@ def append_result(
         "precision",
         "recall",
         "specificity",
-        "hausdorff_distance"
+        "hausdorff_distance",
     ]
 
     missing_metrics = [
@@ -350,7 +453,9 @@ def append_result(
     if missing_metrics:
         raise ValueError(
             "Missing metrics: "
-            + ", ".join(missing_metrics)
+            + ", ".join(
+                missing_metrics
+            )
         )
 
     field_names = [
@@ -360,7 +465,7 @@ def append_result(
         "precision",
         "recall",
         "specificity",
-        "hausdorff_distance"
+        "hausdorff_distance",
     ]
 
     existing_rows = []
@@ -369,9 +474,8 @@ def append_result(
         with csv_path.open(
             mode="r",
             newline="",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as csv_file:
-
             reader = csv.DictReader(
                 csv_file
             )
@@ -380,7 +484,6 @@ def append_result(
                 reader
             )
 
-    # Remove an existing result for this model.
     existing_rows = [
         row
         for row in existing_rows
@@ -389,14 +492,24 @@ def append_result(
 
     new_row = {
         "model": model_name,
-        "dice": f"{metrics['dice']:.6f}",
-        "iou": f"{metrics['iou']:.6f}",
-        "precision": f"{metrics['precision']:.6f}",
-        "recall": f"{metrics['recall']:.6f}",
-        "specificity": f"{metrics['specificity']:.6f}",
+        "dice": (
+            f"{metrics['dice']:.6f}"
+        ),
+        "iou": (
+            f"{metrics['iou']:.6f}"
+        ),
+        "precision": (
+            f"{metrics['precision']:.6f}"
+        ),
+        "recall": (
+            f"{metrics['recall']:.6f}"
+        ),
+        "specificity": (
+            f"{metrics['specificity']:.6f}"
+        ),
         "hausdorff_distance": (
             f"{metrics['hausdorff_distance']:.6f}"
-        )
+        ),
     }
 
     existing_rows.append(
@@ -406,12 +519,11 @@ def append_result(
     with csv_path.open(
         mode="w",
         newline="",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as csv_file:
-
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=field_names
+            fieldnames=field_names,
         )
 
         writer.writeheader()
@@ -428,10 +540,16 @@ def append_result(
 def load_model_checkpoint(
     model,
     checkpoint_path,
-    device
+    device,
 ):
     """
-    Loads a saved model checkpoint safely.
+    Load a saved model checkpoint.
+
+    Supports:
+    1. A plain model state dictionary.
+    2. A checkpoint dictionary containing
+       'model_state_dict'.
+    3. A checkpoint dictionary containing 'state_dict'.
 
     Parameters
     ----------
@@ -439,10 +557,10 @@ def load_model_checkpoint(
         Initialized segmentation model.
 
     checkpoint_path : str or pathlib.Path
-        Path to the model checkpoint.
+        Saved checkpoint path.
 
     device : torch.device
-        Device used for loading the checkpoint.
+        Device used to load the checkpoint.
 
     Returns
     -------
@@ -456,14 +574,33 @@ def load_model_checkpoint(
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(
-            f"Model checkpoint not found: "
+            "Model checkpoint not found: "
             f"{checkpoint_path}"
         )
 
-    state_dict = torch.load(
+    checkpoint = torch.load(
         checkpoint_path,
-        map_location=device
+        map_location=device,
     )
+
+    if (
+        isinstance(checkpoint, dict)
+        and "model_state_dict" in checkpoint
+    ):
+        state_dict = checkpoint[
+            "model_state_dict"
+        ]
+
+    elif (
+        isinstance(checkpoint, dict)
+        and "state_dict" in checkpoint
+    ):
+        state_dict = checkpoint[
+            "state_dict"
+        ]
+
+    else:
+        state_dict = checkpoint
 
     model.load_state_dict(
         state_dict
@@ -471,3 +608,346 @@ def load_model_checkpoint(
 
     return model
 
+# ==========================================================
+# Evaluation Metric Utilities
+# ==========================================================
+
+def initialize_metric_storage():
+    """
+    Create storage for per-image segmentation metrics.
+    """
+
+    return {
+        "dice": [],
+        "iou": [],
+        "precision": [],
+        "recall": [],
+        "specificity": [],
+    }
+
+
+def evaluate_batch_per_image(
+    outputs,
+    masks,
+    metric_storage,
+    result_rows,
+    threshold=0.5,
+):
+    """
+    Calculate segmentation metrics independently for every
+    image in a batch.
+
+    Parameters
+    ----------
+    outputs : torch.Tensor
+        Raw model logits with shape [B, 1, H, W].
+
+    masks : torch.Tensor
+        Ground-truth masks with shape [B, 1, H, W].
+
+    metric_storage : dict
+        Dictionary returned by initialize_metric_storage().
+
+    result_rows : list
+        List where one dictionary is added for each image.
+
+    threshold : float
+        Probability threshold used to create binary masks.
+    """
+
+    from common.metrics import calculate_numpy_metrics
+
+    probabilities = torch.sigmoid(
+        outputs
+    )
+
+    predictions = (
+        probabilities >= threshold
+    ).float()
+
+    batch_size = outputs.shape[0]
+
+    for sample_index in range(batch_size):
+        prediction_numpy = (
+            predictions[sample_index]
+            .detach()
+            .cpu()
+            .squeeze()
+            .numpy()
+        )
+
+        mask_numpy = (
+            masks[sample_index]
+            .detach()
+            .cpu()
+            .squeeze()
+            .numpy()
+        )
+
+        metrics = calculate_numpy_metrics(
+            prediction=prediction_numpy,
+            target=mask_numpy,
+        )
+
+        result_row = {
+            "sample_index": len(result_rows),
+        }
+
+        for metric_name, metric_value in metrics.items():
+            metric_storage[
+                metric_name
+            ].append(
+                float(metric_value)
+            )
+
+            result_row[
+                metric_name
+            ] = float(
+                metric_value
+            )
+
+        result_rows.append(
+            result_row
+        )
+
+
+def summarize_metrics(
+    metric_storage,
+    sample_standard_deviation=False,
+):
+    """
+    Calculate summary statistics for each segmentation metric.
+
+    Returns mean, standard deviation, minimum, maximum,
+    and median.
+    """
+
+    summary = {}
+
+    degrees_of_freedom = (
+        1
+        if sample_standard_deviation
+        else 0
+    )
+
+    for metric_name, values in metric_storage.items():
+        values_array = np.asarray(
+            values,
+            dtype=np.float64,
+        )
+
+        valid_values = values_array[
+            np.isfinite(
+                values_array
+            )
+        ]
+
+        if len(valid_values) == 0:
+            summary[metric_name] = {
+                "mean": np.nan,
+                "std": np.nan,
+                "min": np.nan,
+                "max": np.nan,
+                "median": np.nan,
+                "count": 0,
+            }
+
+            continue
+
+        if (
+            sample_standard_deviation
+            and len(valid_values) < 2
+        ):
+            standard_deviation = np.nan
+        else:
+            standard_deviation = float(
+                np.std(
+                    valid_values,
+                    ddof=degrees_of_freedom,
+                )
+            )
+
+        summary[metric_name] = {
+            "mean": float(
+                np.mean(
+                    valid_values
+                )
+            ),
+            "std": standard_deviation,
+            "min": float(
+                np.min(
+                    valid_values
+                )
+            ),
+            "max": float(
+                np.max(
+                    valid_values
+                )
+            ),
+            "median": float(
+                np.median(
+                    valid_values
+                )
+            ),
+            "count": int(
+                len(valid_values)
+            ),
+        }
+
+    return summary
+
+
+def print_metric_summary(summary):
+    """
+    Print metric summary statistics.
+    """
+
+    print("\nEvaluation Results")
+    print("-" * 72)
+
+    for metric_name, statistics in summary.items():
+        mean_value = statistics["mean"]
+        std_value = statistics["std"]
+        minimum_value = statistics["min"]
+        maximum_value = statistics["max"]
+        median_value = statistics["median"]
+
+        print(
+            f"{metric_name:<18}: "
+            f"{mean_value:.4f} ± {std_value:.4f} "
+            f"| min={minimum_value:.4f} "
+            f"| max={maximum_value:.4f} "
+            f"| median={median_value:.4f}"
+        )
+
+
+def get_mean_metrics(summary):
+    """
+    Extract only the mean value for each metric.
+    """
+
+    return {
+        metric_name: statistics["mean"]
+        for metric_name, statistics in summary.items()
+    }
+
+
+def save_evaluation_results(
+    model_name,
+    result_rows,
+    summary,
+    results_root,
+):
+    """
+    Save per-image metrics and summary statistics as CSV files.
+
+    Output structure:
+
+        results/
+        └── model_name/
+            ├── per_image_metrics.csv
+            └── summary_metrics.csv
+    """
+
+    results_directory = (
+        Path(results_root)
+        / model_name
+    )
+
+    results_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # ------------------------------------------------------
+    # Per-image metrics
+    # ------------------------------------------------------
+
+    per_image_path = (
+        results_directory
+        / "per_image_metrics.csv"
+    )
+
+    if result_rows:
+        field_names = []
+
+        for row in result_rows:
+            for key in row.keys():
+                if key not in field_names:
+                    field_names.append(
+                        key
+                    )
+
+        with per_image_path.open(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+        ) as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=field_names,
+            )
+
+            writer.writeheader()
+
+            writer.writerows(
+                result_rows
+            )
+
+    # ------------------------------------------------------
+    # Summary metrics
+    # ------------------------------------------------------
+
+    summary_path = (
+        results_directory
+        / "summary_metrics.csv"
+    )
+
+    summary_field_names = [
+        "metric",
+        "mean",
+        "std",
+        "min",
+        "max",
+        "median",
+        "count",
+    ]
+
+    summary_rows = []
+
+    for metric_name, statistics in summary.items():
+        summary_rows.append({
+            "metric": metric_name,
+            "mean": statistics["mean"],
+            "std": statistics["std"],
+            "min": statistics["min"],
+            "max": statistics["max"],
+            "median": statistics["median"],
+            "count": statistics["count"],
+        })
+
+    with summary_path.open(
+        mode="w",
+        newline="",
+        encoding="utf-8",
+    ) as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=summary_field_names,
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            summary_rows
+        )
+
+    print(
+        "Per-image metrics saved to:",
+        per_image_path,
+    )
+
+    print(
+        "Summary metrics saved to:",
+        summary_path,
+    )

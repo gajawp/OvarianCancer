@@ -1,0 +1,10 @@
+torch
+torchvision
+segmentation-models-pytorch>=0.3.3
+transformers>=4.40
+huggingface-hub
+timm
+albumentations>=1.4
+opencv-python
+numpy
+scipy

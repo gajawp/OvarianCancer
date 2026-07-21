@@ -16,7 +16,15 @@ from common.utils import (
 from transunet.model import TransUNet
 
 
+# ==========================================================
+# Dice Loss
+# ==========================================================
+
 class DiceLoss(nn.Module):
+    """
+    Soft Dice loss for binary segmentation.
+    """
+
     def forward(self, logits, target):
         probabilities = torch.sigmoid(
             logits
@@ -46,48 +54,258 @@ DICE_LOSS = DiceLoss()
 
 
 def segmentation_loss(logits, target):
+    """
+    Combined BCE and Dice loss.
+    """
+
     return (
         BCE_LOSS(logits, target)
         + DICE_LOSS(logits, target)
     )
 
 
-def validate_model(
-    model,
-    validation_loader,
-    device,
-):
-    model.eval()
+# ==========================================================
+# Model Output Helper
+# ==========================================================
 
-    total_dice = 0.0
-    total_iou = 0.0
+def extract_final_logits(model_output):
+    """
+    Extract final segmentation logits from different output
+    formats.
+    """
 
-    with torch.no_grad():
-        for images, masks in validation_loader:
-            images = images.to(device)
-            masks = masks.to(device)
+    if isinstance(model_output, torch.Tensor):
+        return model_output
 
-            logits = model(images)
+    if isinstance(model_output, (tuple, list)):
+        if len(model_output) == 0:
+            raise ValueError(
+                "TransUNet returned an empty tuple or list."
+            )
 
-            total_dice += dice_score(
-                logits,
-                masks,
-                threshold=config.PREDICTION_THRESHOLD,
-            ).item()
+        return model_output[0]
 
-            total_iou += iou_score(
-                logits,
-                masks,
-                threshold=config.PREDICTION_THRESHOLD,
-            ).item()
+    if isinstance(model_output, dict):
+        possible_keys = [
+            "out",
+            "logits",
+            "prediction",
+            "pred",
+        ]
 
-    return (
-        total_dice / len(validation_loader),
-        total_iou / len(validation_loader),
+        for key in possible_keys:
+            if key in model_output:
+                return model_output[key]
+
+        raise KeyError(
+            "Could not find segmentation logits in the "
+            "TransUNet output dictionary."
+        )
+
+    raise TypeError(
+        "Unsupported TransUNet output type: "
+        f"{type(model_output).__name__}"
     )
 
 
+# ==========================================================
+# Train One Epoch
+# ==========================================================
+
+def train_one_epoch(
+    model,
+    train_loader,
+    optimizer,
+    device,
+    epoch,
+):
+    """
+    Train TransUNet for one epoch.
+
+    Returns
+    -------
+    tuple
+        average_loss, average_dice, average_iou
+    """
+
+    model.train()
+
+    total_loss = 0.0
+    total_dice = 0.0
+    total_iou = 0.0
+    total_samples = 0
+
+    progress_bar = tqdm(
+        train_loader,
+        desc=(
+            f"Epoch {epoch + 1}/"
+            f"{config.EPOCHS}"
+        ),
+    )
+
+    for batch in progress_bar:
+        if len(batch) < 2:
+            raise ValueError(
+                "The training DataLoader must return "
+                "an image and a mask."
+            )
+
+        images = batch[0].to(
+            device,
+            non_blocking=True,
+        )
+
+        masks = batch[1].to(
+            device,
+            non_blocking=True,
+        )
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+        model_output = model(
+            images
+        )
+
+        logits = extract_final_logits(
+            model_output
+        )
+
+        loss = segmentation_loss(
+            logits,
+            masks,
+        )
+
+        loss.backward()
+
+        optimizer.step()
+
+        batch_size = images.size(0)
+
+        batch_dice = dice_score(
+            logits.detach(),
+            masks,
+            threshold=(
+                config.PREDICTION_THRESHOLD
+            ),
+        ).item()
+
+        batch_iou = iou_score(
+            logits.detach(),
+            masks,
+            threshold=(
+                config.PREDICTION_THRESHOLD
+            ),
+        ).item()
+
+        total_loss += (
+            loss.item()
+            * batch_size
+        )
+
+        total_dice += (
+            batch_dice
+            * batch_size
+        )
+
+        total_iou += (
+            batch_iou
+            * batch_size
+        )
+
+        total_samples += batch_size
+
+        progress_bar.set_postfix(
+            loss=f"{loss.item():.4f}",
+            dice=f"{batch_dice:.4f}",
+            iou=f"{batch_iou:.4f}",
+        )
+
+    if total_samples == 0:
+        raise RuntimeError(
+            "The TransUNet training DataLoader "
+            "contained no samples."
+        )
+
+    average_loss = (
+        total_loss
+        / total_samples
+    )
+
+    average_dice = (
+        total_dice
+        / total_samples
+    )
+
+    average_iou = (
+        total_iou
+        / total_samples
+    )
+
+    return (
+        average_loss,
+        average_dice,
+        average_iou,
+    )
+
+
+# ==========================================================
+# Checkpoint Saving
+# ==========================================================
+
+def save_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    training_loss,
+    training_dice,
+    training_iou,
+    checkpoint_path,
+):
+    """
+    Save TransUNet weights and training metadata.
+    """
+
+    checkpoint = {
+        "epoch": epoch + 1,
+        "model_state_dict": (
+            model.state_dict()
+        ),
+        "optimizer_state_dict": (
+            optimizer.state_dict()
+        ),
+        "training_loss": training_loss,
+        "training_dice": training_dice,
+        "training_iou": training_iou,
+        "random_seed": config.RANDOM_SEED,
+        "training_list": str(
+            config.TRAIN_LIST_PATH
+        ),
+    }
+
+    torch.save(
+        checkpoint,
+        checkpoint_path,
+    )
+
+
+# ==========================================================
+# Main
+# ==========================================================
+
 def main():
+    """
+    Train TransUNet using only the official training split.
+
+    train_cls.txt:
+        Used for model training.
+
+    val_cls.txt:
+        Not used during training. It is evaluated separately
+        by transunet/evaluate.py.
+    """
+
     set_random_seed(
         config.RANDOM_SEED
     )
@@ -100,14 +318,74 @@ def main():
         )
     )
 
-    train_loader, validation_loader = (
-        create_data_loaders(config)
+    print("=" * 70)
+    print("TransUNet Segmentation Training")
+    print("=" * 70)
+
+    print(
+        "Device:",
+        device,
     )
+
+    print(
+        "Official training list:",
+        config.TRAIN_LIST_PATH,
+    )
+
+    print(
+        "Official test list:",
+        config.TEST_LIST_PATH,
+    )
+
+    # ------------------------------------------------------
+    # Training DataLoader
+    # ------------------------------------------------------
+
+    train_loader, _ = create_data_loaders(
+        config
+    )
+
+    print(
+        "Training images:",
+        len(train_loader.dataset),
+    )
+
+    print(
+        "Official test images are not used during training."
+    )
+
+    print(
+        "Image size:",
+        config.IMAGE_SIZE,
+    )
+
+    print(
+        "Batch size:",
+        config.BATCH_SIZE,
+    )
+
+    print(
+        "Epochs:",
+        config.EPOCHS,
+    )
+
+    print(
+        "Learning rate:",
+        config.LEARNING_RATE,
+    )
+
+    # ------------------------------------------------------
+    # Model
+    # ------------------------------------------------------
 
     model = TransUNet(
         in_channels=3,
         out_channels=1,
     ).to(device)
+
+    # ------------------------------------------------------
+    # Optimizer and Scheduler
+    # ------------------------------------------------------
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -115,13 +393,20 @@ def main():
         weight_decay=1e-4,
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=0.5,
-        patience=5,
-        min_lr=1e-7,
+    scheduler = (
+        torch.optim.lr_scheduler
+        .ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7,
+        )
     )
+
+    # ------------------------------------------------------
+    # Checkpoint
+    # ------------------------------------------------------
 
     checkpoint_path = (
         config.TRANSUNET_MODEL_PATH
@@ -132,123 +417,144 @@ def main():
         exist_ok=True,
     )
 
-    best_dice = -1.0
+    best_training_loss = float(
+        "inf"
+    )
+
     epochs_without_improvement = 0
 
-    print("Training TransUNet")
-    print("------------------")
-    print("Device:", device)
-    print(
-        "Training images:",
-        len(train_loader.dataset),
-    )
-    print(
-        "Validation images:",
-        len(validation_loader.dataset),
-    )
+    # ------------------------------------------------------
+    # Epoch Loop
+    # ------------------------------------------------------
 
     for epoch in range(
         config.EPOCHS
     ):
-        start_time = time.time()
+        epoch_start_time = time.time()
 
-        model.train()
-        total_loss = 0.0
-
-        progress_bar = tqdm(
-            train_loader,
-            desc=(
-                f"Epoch {epoch + 1}/"
-                f"{config.EPOCHS}"
-            ),
-        )
-
-        for images, masks in progress_bar:
-            images = images.to(device)
-            masks = masks.to(device)
-
-            optimizer.zero_grad()
-
-            logits = model(images)
-
-            loss = segmentation_loss(
-                logits,
-                masks,
-            )
-
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-            progress_bar.set_postfix(
-                loss=f"{loss.item():.4f}"
-            )
-
-        average_loss = (
-            total_loss / len(train_loader)
-        )
-
-        validation_dice, validation_iou = (
-            validate_model(
-                model,
-                validation_loader,
-                device,
-            )
+        (
+            training_loss,
+            training_dice,
+            training_iou,
+        ) = train_one_epoch(
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            device=device,
+            epoch=epoch,
         )
 
         scheduler.step(
-            validation_dice
+            training_loss
+        )
+
+        current_learning_rate = (
+            optimizer
+            .param_groups[0]["lr"]
+        )
+
+        elapsed_time = (
+            time.time()
+            - epoch_start_time
         )
 
         print(
-            f"Epoch [{epoch + 1}/"
-            f"{config.EPOCHS}] "
-            f"Loss: {average_loss:.4f} "
-            f"Dice: {validation_dice:.4f} "
-            f"IoU: {validation_iou:.4f} "
-            f"LR: "
-            f"{optimizer.param_groups[0]['lr']:.7f} "
-            f"Time: "
-            f"{time.time() - start_time:.1f}s"
+            f"\nEpoch [{epoch + 1}/"
+            f"{config.EPOCHS}]"
         )
 
-        if validation_dice > best_dice:
-            best_dice = validation_dice
+        print(
+            f"Training Loss : "
+            f"{training_loss:.4f}"
+        )
+
+        print(
+            f"Training Dice : "
+            f"{training_dice:.4f}"
+        )
+
+        print(
+            f"Training IoU  : "
+            f"{training_iou:.4f}"
+        )
+
+        print(
+            f"Learning Rate : "
+            f"{current_learning_rate:.7f}"
+        )
+
+        print(
+            f"Epoch Time    : "
+            f"{elapsed_time:.1f} seconds"
+        )
+
+        # --------------------------------------------------
+        # Best Checkpoint
+        # --------------------------------------------------
+
+        if training_loss < best_training_loss:
+            best_training_loss = training_loss
             epochs_without_improvement = 0
 
-            torch.save(
-                model.state_dict(),
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                training_loss=training_loss,
+                training_dice=training_dice,
+                training_iou=training_iou,
+                checkpoint_path=checkpoint_path,
+            )
+
+            print(
+                "Best model saved:",
                 checkpoint_path,
             )
 
             print(
-                f"Model saved: "
-                f"{checkpoint_path} "
-                f"(best Dice: "
-                f"{best_dice:.4f})"
+                "Best training loss:",
+                f"{best_training_loss:.4f}",
             )
 
         else:
             epochs_without_improvement += 1
+
+            print(
+                "Epochs without improvement:",
+                epochs_without_improvement,
+            )
+
+        # --------------------------------------------------
+        # Early Stopping
+        # --------------------------------------------------
 
         if (
             epochs_without_improvement
             >= config.EARLY_STOPPING_PATIENCE
         ):
             print(
-                "Early stopping triggered."
+                "\nEarly stopping triggered."
             )
+
             break
 
-    print("\nTraining completed.")
+    print("\n" + "=" * 70)
+    print("TransUNet training completed")
+    print("=" * 70)
+
     print(
-        f"Best validation Dice: "
-        f"{best_dice:.4f}"
+        "Best training loss:",
+        f"{best_training_loss:.4f}",
     )
+
     print(
         "Checkpoint:",
         checkpoint_path,
+    )
+
+    print(
+        "\nRun transunet.evaluate to calculate final "
+        "metrics on the official test set."
     )
 
 

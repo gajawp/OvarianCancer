@@ -6,10 +6,12 @@ import torch
 from tqdm import tqdm
 
 from common import config
-from common.metrics import hausdorff_distance
+from common.metrics import (
+    hausdorff_distance,
+)
 from common.utils import (
     append_result,
-    create_validation_loader,
+    create_test_loader,
     evaluate_batch_per_image,
     get_mean_metrics,
     initialize_metric_storage,
@@ -18,27 +20,39 @@ from common.utils import (
     save_evaluation_results,
     summarize_metrics,
 )
-from deeplabv3plus.model import DeepLabV3Plus
+from deeplabv3plus.model import (
+    DeepLabV3Plus,
+)
 
 
 # ==========================================================
 # Model Output Helper
 # ==========================================================
 
-def extract_final_logits(model_output):
+def extract_final_logits(
+    model_output,
+):
     """
-    Extract segmentation logits from the model output.
+    Extract segmentation logits from different model-output
+    formats.
 
     Supports:
-    - Tensor output
-    - Tuple or list output
-    - Dictionary output
+    - torch.Tensor
+    - tuple
+    - list
+    - dictionary
     """
 
-    if isinstance(model_output, torch.Tensor):
+    if isinstance(
+        model_output,
+        torch.Tensor,
+    ):
         return model_output
 
-    if isinstance(model_output, (tuple, list)):
+    if isinstance(
+        model_output,
+        (tuple, list),
+    ):
         if len(model_output) == 0:
             raise ValueError(
                 "The model returned an empty tuple or list."
@@ -46,7 +60,10 @@ def extract_final_logits(model_output):
 
         return model_output[0]
 
-    if isinstance(model_output, dict):
+    if isinstance(
+        model_output,
+        dict,
+    ):
         possible_keys = [
             "out",
             "logits",
@@ -59,8 +76,8 @@ def extract_final_logits(model_output):
                 return model_output[key]
 
         raise KeyError(
-            "Could not find segmentation logits in the "
-            "model output dictionary."
+            "Could not find segmentation logits "
+            "inside the model output dictionary."
         )
 
     raise TypeError(
@@ -70,7 +87,7 @@ def extract_final_logits(model_output):
 
 
 # ==========================================================
-# Qualitative Result
+# Qualitative Result Saving
 # ==========================================================
 
 def save_qualitative_result(
@@ -79,16 +96,20 @@ def save_qualitative_result(
     predicted_mask,
     index,
     save_directory,
+    image_name=None,
 ):
     """
-    Save:
+    Save four visualizations:
+
     1. Input ultrasound image
-    2. Ground-truth mask
-    3. Predicted mask
+    2. Ground-truth segmentation mask
+    3. Predicted segmentation mask
     4. Prediction overlay
     """
 
-    save_directory = Path(save_directory)
+    save_directory = Path(
+        save_directory
+    )
 
     save_directory.mkdir(
         parents=True,
@@ -120,41 +141,76 @@ def save_qualitative_result(
     )
 
     plt.subplot(1, 4, 1)
-    plt.title("Input Ultrasound")
-    plt.imshow(image_numpy)
-    plt.axis("off")
+    plt.title(
+        "Input Ultrasound"
+    )
+    plt.imshow(
+        image_numpy
+    )
+    plt.axis(
+        "off"
+    )
 
     plt.subplot(1, 4, 2)
-    plt.title("Ground Truth")
+    plt.title(
+        "Ground Truth"
+    )
     plt.imshow(
         target_numpy,
         cmap="gray",
     )
-    plt.axis("off")
+    plt.axis(
+        "off"
+    )
 
     plt.subplot(1, 4, 3)
-    plt.title("Prediction")
+    plt.title(
+        "Prediction"
+    )
     plt.imshow(
         predicted_mask,
         cmap="gray",
     )
-    plt.axis("off")
+    plt.axis(
+        "off"
+    )
 
     plt.subplot(1, 4, 4)
-    plt.title("Prediction Overlay")
-    plt.imshow(image_numpy)
+    plt.title(
+        "Prediction Overlay"
+    )
+    plt.imshow(
+        image_numpy
+    )
     plt.imshow(
         predicted_mask,
         cmap="jet",
         alpha=0.35,
     )
-    plt.axis("off")
+    plt.axis(
+        "off"
+    )
 
     plt.tight_layout()
 
+    if image_name is not None:
+        safe_name = (
+            Path(image_name)
+            .stem
+        )
+
+        output_filename = (
+            f"{safe_name}_result.png"
+        )
+    else:
+        output_filename = (
+            f"deeplabv3plus_result_"
+            f"{index:03d}.png"
+        )
+
     output_path = (
         save_directory
-        / f"deeplabv3plus_result_{index:03d}.png"
+        / output_filename
     )
 
     figure.savefig(
@@ -163,46 +219,53 @@ def save_qualitative_result(
         bbox_inches="tight",
     )
 
-    plt.close(figure)
+    plt.close(
+        figure
+    )
 
 
 # ==========================================================
-# Evaluation
+# Main Evaluation
 # ==========================================================
 
 def main():
     """
-    Evaluate the trained DeepLabV3+ model.
+    Evaluate the trained DeepLabV3+ model using the official
+    held-out segmentation test set.
 
-    This script:
-    - Loads the validation dataset
-    - Loads the saved checkpoint
-    - Calculates metrics per image
-    - Reports mean and standard deviation
-    - Saves qualitative results
-    - Saves per-image metrics
-    - Saves summary metrics
-    - Updates the global comparison CSV
+    val_cls.txt is treated as the official test partition.
     """
 
     device = torch.device(
         config.DEVICE
     )
 
-    print("Device:", device)
+    print("=" * 70)
+    print("DeepLabV3+ Official Test Evaluation")
+    print("=" * 70)
+
+    print(
+        "Device:",
+        device,
+    )
+
+    print(
+        "Official test list:",
+        config.TEST_LIST_PATH,
+    )
 
     # ------------------------------------------------------
-    # Validation DataLoader
+    # Official Test DataLoader
     # ------------------------------------------------------
 
-    validation_loader = create_validation_loader(
+    test_loader = create_test_loader(
         config=config,
         batch_size=1,
     )
 
     print(
-        "Validation samples:",
-        len(validation_loader.dataset),
+        "Official test samples:",
+        len(test_loader.dataset),
     )
 
     # ------------------------------------------------------
@@ -255,8 +318,6 @@ def main():
 
     result_rows = []
 
-    # Retain ordinary Hausdorff Distance for compatibility
-    # with your previous results.
     hausdorff_values = []
 
     # ------------------------------------------------------
@@ -265,8 +326,11 @@ def main():
 
     with torch.no_grad():
         progress_bar = tqdm(
-            validation_loader,
-            desc="Evaluating DeepLabV3+",
+            test_loader,
+            desc=(
+                "Evaluating DeepLabV3+ "
+                "on official test set"
+            ),
         )
 
         for index, batch in enumerate(
@@ -274,7 +338,7 @@ def main():
         ):
             if len(batch) < 2:
                 raise ValueError(
-                    "The validation DataLoader must return "
+                    "The test DataLoader must return "
                     "an image and a mask."
                 )
 
@@ -288,13 +352,37 @@ def main():
                 non_blocking=True,
             )
 
-            model_output = model(image)
+            # Support datasets that optionally return the
+            # original image filename as a third value.
+            image_name = None
+
+            if len(batch) >= 3:
+                filename_batch = batch[2]
+
+                if isinstance(
+                    filename_batch,
+                    (tuple, list),
+                ):
+                    image_name = (
+                        filename_batch[0]
+                    )
+                else:
+                    image_name = str(
+                        filename_batch
+                    )
+
+            model_output = model(
+                image
+            )
 
             logits = extract_final_logits(
                 model_output
             )
 
-            # Calculate all segmentation metrics per image.
+            # ------------------------------------------------
+            # Per-image Segmentation Metrics
+            # ------------------------------------------------
+
             evaluate_batch_per_image(
                 outputs=logits,
                 masks=mask,
@@ -305,12 +393,12 @@ def main():
                 ),
             )
 
-            prediction_probability = torch.sigmoid(
+            probability = torch.sigmoid(
                 logits
             )
 
             prediction = (
-                prediction_probability
+                probability
                 >= config.PREDICTION_THRESHOLD
             ).float()
 
@@ -328,10 +416,15 @@ def main():
                 .numpy()
             )
 
-            # Ordinary Hausdorff Distance.
-            sample_hausdorff = hausdorff_distance(
-                prediction_numpy,
-                mask_numpy,
+            # ------------------------------------------------
+            # Hausdorff Distance
+            # ------------------------------------------------
+
+            sample_hausdorff = (
+                hausdorff_distance(
+                    prediction_numpy,
+                    mask_numpy,
+                )
             )
 
             hausdorff_values.append(
@@ -342,16 +435,25 @@ def main():
                 "hausdorff_distance"
             ] = sample_hausdorff
 
-            # Save the first 30 qualitative examples.
+            if image_name is not None:
+                result_rows[-1][
+                    "image_name"
+                ] = image_name
+
+            # Save only the first 30 examples to avoid
+            # generating hundreds of large figures.
             if index < 30:
                 save_qualitative_result(
                     image=image[0],
                     target_mask=mask[0],
-                    predicted_mask=prediction_numpy,
+                    predicted_mask=(
+                        prediction_numpy
+                    ),
                     index=index,
                     save_directory=(
                         qualitative_directory
                     ),
+                    image_name=image_name,
                 )
 
     # ------------------------------------------------------
@@ -362,6 +464,9 @@ def main():
         metric_storage=metric_storage,
         sample_standard_deviation=False,
     )
+
+    print("\nOfficial test metric summary")
+    print("-" * 40)
 
     print_metric_summary(
         summary
@@ -380,7 +485,9 @@ def main():
         ]
     )
 
-    if len(valid_hausdorff_values) > 0:
+    if len(
+        valid_hausdorff_values
+    ) > 0:
         average_hausdorff = float(
             np.mean(
                 valid_hausdorff_values
@@ -393,8 +500,13 @@ def main():
             )
         )
     else:
-        average_hausdorff = np.nan
-        std_hausdorff = np.nan
+        average_hausdorff = (
+            np.nan
+        )
+
+        std_hausdorff = (
+            np.nan
+        )
 
     print(
         f"{'hausdorff_distance':<22}: "
@@ -407,7 +519,9 @@ def main():
     # ------------------------------------------------------
 
     save_evaluation_results(
-        model_name="deeplabv3plus",
+        model_name=(
+            "deeplabv3plus_official_test"
+        ),
         result_rows=result_rows,
         summary=summary,
         results_root=results_root,
@@ -435,9 +549,9 @@ def main():
     # Final Messages
     # ------------------------------------------------------
 
-    print(
-        "\nDeepLabV3+ evaluation completed."
-    )
+    print("\n" + "=" * 70)
+    print("Official test evaluation completed")
+    print("=" * 70)
 
     print(
         "Comparison table updated:",
@@ -451,7 +565,10 @@ def main():
 
     print(
         "Detailed metric results saved in:",
-        results_root / "deeplabv3plus",
+        (
+            results_root
+            / "deeplabv3plus_official_test"
+        ),
     )
 
 

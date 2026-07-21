@@ -10,7 +10,7 @@ from common import config
 from common.metrics import hausdorff_distance
 from common.utils import (
     append_result,
-    create_validation_loader,
+    create_test_loader,
     evaluate_batch_per_image,
     get_mean_metrics,
     initialize_metric_storage,
@@ -27,22 +27,12 @@ from common.utils import (
 
 def extract_final_logits(model_output):
     """
-    Extract the final segmentation logits from model output.
+    Extract the final segmentation logits.
 
-    This supports models that return:
+    Supports:
     - A single tensor
-    - A tuple or list of tensors
-    - A dictionary containing an output tensor
-
-    Parameters
-    ----------
-    model_output
-        Raw output returned by the segmentation model.
-
-    Returns
-    -------
-    torch.Tensor
-        Final segmentation logits with shape [B, 1, H, W].
+    - A tuple or list
+    - A dictionary
     """
 
     if isinstance(model_output, torch.Tensor):
@@ -89,34 +79,19 @@ def save_qualitative_result(
     predicted_mask,
     index,
     save_directory,
+    image_name=None,
 ):
     """
-    Save a qualitative segmentation result containing:
-
+    Save:
     1. Input ultrasound image
     2. Ground-truth mask
     3. Predicted mask
     4. Prediction overlay
-
-    Parameters
-    ----------
-    image : torch.Tensor
-        Image tensor with shape [C, H, W].
-
-    target_mask : torch.Tensor
-        Ground-truth mask with shape [1, H, W] or [H, W].
-
-    predicted_mask : numpy.ndarray
-        Binary predicted mask with shape [H, W].
-
-    index : int
-        Sample index.
-
-    save_directory : pathlib.Path
-        Directory where the visualization is saved.
     """
 
-    save_directory = Path(save_directory)
+    save_directory = Path(
+        save_directory
+    )
 
     save_directory.mkdir(
         parents=True,
@@ -137,8 +112,6 @@ def save_qualitative_result(
         .numpy()
     )
 
-    # Prevent display problems if the tensor contains values
-    # outside the normal image range.
     image_numpy = np.clip(
         image_numpy,
         0.0,
@@ -182,9 +155,19 @@ def save_qualitative_result(
 
     plt.tight_layout()
 
+    if image_name is not None:
+        output_filename = (
+            f"{Path(image_name).stem}_result.png"
+        )
+    else:
+        output_filename = (
+            f"attention_unet_result_"
+            f"{index:03d}.png"
+        )
+
     output_path = (
         save_directory
-        / f"attention_unet_result_{index:03d}.png"
+        / output_filename
     )
 
     figure.savefig(
@@ -193,7 +176,9 @@ def save_qualitative_result(
         bbox_inches="tight",
     )
 
-    plt.close(figure)
+    plt.close(
+        figure
+    )
 
 
 # ==========================================================
@@ -202,38 +187,40 @@ def save_qualitative_result(
 
 def main():
     """
-    Evaluate the trained Attention U-Net model.
-
-    The script:
-    - Loads the validation dataset
-    - Loads the saved model checkpoint
-    - Calculates segmentation metrics per image
-    - Calculates mean, standard deviation, minimum,
-      maximum, and median
-    - Saves qualitative results
-    - Saves per-image metrics
-    - Saves metric summaries
-    - Updates the global model-comparison CSV
+    Evaluate Attention U-Net on the official held-out
+    segmentation test partition defined by val_cls.txt.
     """
 
     device = torch.device(
         config.DEVICE
     )
 
-    print("Device:", device)
+    print("=" * 70)
+    print("Attention U-Net Official Test Evaluation")
+    print("=" * 70)
+
+    print(
+        "Device:",
+        device,
+    )
+
+    print(
+        "Official test list:",
+        config.TEST_LIST_PATH,
+    )
 
     # ------------------------------------------------------
-    # Validation DataLoader
+    # Official Test DataLoader
     # ------------------------------------------------------
 
-    validation_loader = create_validation_loader(
+    test_loader = create_test_loader(
         config=config,
         batch_size=1,
     )
 
     print(
-        "Validation samples:",
-        len(validation_loader.dataset),
+        "Official test samples:",
+        len(test_loader.dataset),
     )
 
     # ------------------------------------------------------
@@ -286,8 +273,6 @@ def main():
 
     result_rows = []
 
-    # Keep ordinary Hausdorff Distance for compatibility
-    # with previously generated model results.
     hausdorff_values = []
 
     # ------------------------------------------------------
@@ -296,8 +281,11 @@ def main():
 
     with torch.no_grad():
         progress_bar = tqdm(
-            validation_loader,
-            desc="Evaluating Attention U-Net",
+            test_loader,
+            desc=(
+                "Evaluating Attention U-Net "
+                "on official test set"
+            ),
         )
 
         for index, batch in enumerate(
@@ -305,8 +293,8 @@ def main():
         ):
             if len(batch) < 2:
                 raise ValueError(
-                    "The validation DataLoader must return "
-                    "at least an image and a mask."
+                    "The test DataLoader must return "
+                    "an image and a mask."
                 )
 
             image = batch[0].to(
@@ -319,13 +307,35 @@ def main():
                 non_blocking=True,
             )
 
-            model_output = model(image)
+            image_name = None
+
+            if len(batch) >= 3:
+                filename_batch = batch[2]
+
+                if isinstance(
+                    filename_batch,
+                    (tuple, list),
+                ):
+                    image_name = (
+                        filename_batch[0]
+                    )
+                else:
+                    image_name = str(
+                        filename_batch
+                    )
+
+            model_output = model(
+                image
+            )
 
             final_logits = extract_final_logits(
                 model_output
             )
 
-            # Calculate all new metrics per image.
+            # ------------------------------------------------
+            # Per-image Metrics
+            # ------------------------------------------------
+
             evaluate_batch_per_image(
                 outputs=final_logits,
                 masks=mask,
@@ -336,8 +346,10 @@ def main():
                 ),
             )
 
-            prediction_probability = torch.sigmoid(
-                final_logits
+            prediction_probability = (
+                torch.sigmoid(
+                    final_logits
+                )
             )
 
             prediction = (
@@ -359,33 +371,43 @@ def main():
                 .numpy()
             )
 
-            # Ordinary Hausdorff Distance is retained so
-            # older and newer model results remain comparable.
-            sample_hausdorff = hausdorff_distance(
-                prediction_numpy,
-                mask_numpy,
+            # ------------------------------------------------
+            # Hausdorff Distance
+            # ------------------------------------------------
+
+            sample_hausdorff = (
+                hausdorff_distance(
+                    prediction_numpy,
+                    mask_numpy,
+                )
             )
 
             hausdorff_values.append(
                 sample_hausdorff
             )
 
-            # Add ordinary Hausdorff Distance to the
-            # corresponding per-image result row.
             result_rows[-1][
                 "hausdorff_distance"
             ] = sample_hausdorff
 
-            # Save up to 30 qualitative examples.
+            if image_name is not None:
+                result_rows[-1][
+                    "image_name"
+                ] = image_name
+
+            # Save the first 30 qualitative examples.
             if index < 30:
                 save_qualitative_result(
                     image=image[0],
                     target_mask=mask[0],
-                    predicted_mask=prediction_numpy,
+                    predicted_mask=(
+                        prediction_numpy
+                    ),
                     index=index,
                     save_directory=(
                         qualitative_directory
                     ),
+                    image_name=image_name,
                 )
 
     # ------------------------------------------------------
@@ -395,6 +417,14 @@ def main():
     summary = summarize_metrics(
         metric_storage=metric_storage,
         sample_standard_deviation=False,
+    )
+
+    print(
+        "\nOfficial test metric summary"
+    )
+
+    print(
+        "-" * 40
     )
 
     print_metric_summary(
@@ -441,14 +471,16 @@ def main():
     # ------------------------------------------------------
 
     save_evaluation_results(
-        model_name="attention_unet",
+        model_name=(
+            "attention_unet_official_test"
+        ),
         result_rows=result_rows,
         summary=summary,
         results_root=results_root,
     )
 
     # ------------------------------------------------------
-    # Update Global Model Comparison CSV
+    # Global Comparison CSV
     # ------------------------------------------------------
 
     average_metrics = get_mean_metrics(
@@ -469,9 +501,9 @@ def main():
     # Final Output
     # ------------------------------------------------------
 
-    print(
-        "\nAttention U-Net evaluation completed."
-    )
+    print("\n" + "=" * 70)
+    print("Official test evaluation completed")
+    print("=" * 70)
 
     print(
         "Comparison table updated:",
@@ -485,7 +517,10 @@ def main():
 
     print(
         "Detailed metric results saved in:",
-        results_root / "attention_unet",
+        (
+            results_root
+            / "attention_unet_official_test"
+        ),
     )
 
 

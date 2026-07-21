@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import torch
 
 
@@ -22,6 +23,19 @@ IMAGE_DIR = (
 MASK_DIR = (
     DATASET_ROOT
     / "annotations"
+)
+
+# Official dataset partitions.
+# The class labels inside these files are ignored for
+# segmentation; only the image filenames are used.
+TRAIN_LIST_PATH = (
+    DATASET_ROOT
+    / "train_cls.txt"
+)
+
+TEST_LIST_PATH = (
+    DATASET_ROOT
+    / "val_cls.txt"
 )
 
 RESULTS_DIR = (
@@ -51,8 +65,6 @@ BATCH_SIZE = 4
 EPOCHS = 50
 
 LEARNING_RATE = 1e-4
-
-TRAIN_SPLIT = 0.80
 
 RANDOM_SEED = 42
 
@@ -160,6 +172,60 @@ DEEPLABV3PLUS_RESULTS_DIR = (
 
 
 # ==========================================================
+# SegFormer
+# ==========================================================
+
+SEGFORMER_MODEL_PATH = (
+    PROJECT_ROOT
+    / "segformer"
+    / "weights"
+    / "best_model.pth"
+)
+
+SEGFORMER_RESULTS_DIR = (
+    PROJECT_ROOT
+    / "segformer"
+    / "qualitative_results"
+)
+
+
+# ==========================================================
+# TransUNet
+# ==========================================================
+
+TRANSUNET_MODEL_PATH = (
+    PROJECT_ROOT
+    / "transunet"
+    / "weights"
+    / "best_model.pth"
+)
+
+TRANSUNET_RESULTS_DIR = (
+    PROJECT_ROOT
+    / "transunet"
+    / "qualitative_results"
+)
+
+
+# ==========================================================
+# U-Net++
+# ==========================================================
+
+UNETPLUSPLUS_MODEL_PATH = (
+    PROJECT_ROOT
+    / "unetplusplus"
+    / "weights"
+    / "best_model.pth"
+)
+
+UNETPLUSPLUS_RESULTS_DIR = (
+    PROJECT_ROOT
+    / "unetplusplus"
+    / "qualitative_results"
+)
+
+
+# ==========================================================
 # Create Directories
 # ==========================================================
 
@@ -208,23 +274,6 @@ DEEPLABV3PLUS_RESULTS_DIR.mkdir(
     exist_ok=True,
 )
 
-# ==========================================================
-# SegFormer
-# ==========================================================
-
-SEGFORMER_MODEL_PATH = (
-    PROJECT_ROOT
-    / "segformer"
-    / "weights"
-    / "best_model.pth"
-)
-
-SEGFORMER_RESULTS_DIR = (
-    PROJECT_ROOT
-    / "segformer"
-    / "qualitative_results"
-)
-
 SEGFORMER_MODEL_PATH.parent.mkdir(
     parents=True,
     exist_ok=True,
@@ -233,23 +282,6 @@ SEGFORMER_MODEL_PATH.parent.mkdir(
 SEGFORMER_RESULTS_DIR.mkdir(
     parents=True,
     exist_ok=True,
-)
-
-# ==========================================================
-# TransUNet
-# ==========================================================
-
-TRANSUNET_MODEL_PATH = (
-    PROJECT_ROOT
-    / "transunet"
-    / "weights"
-    / "best_model.pth"
-)
-
-TRANSUNET_RESULTS_DIR = (
-    PROJECT_ROOT
-    / "transunet"
-    / "qualitative_results"
 )
 
 TRANSUNET_MODEL_PATH.parent.mkdir(
@@ -262,23 +294,6 @@ TRANSUNET_RESULTS_DIR.mkdir(
     exist_ok=True,
 )
 
-# ==========================================================
-# U-Net++
-# ==========================================================
-
-UNETPLUSPLUS_MODEL_PATH = (
-    PROJECT_ROOT
-    / "unetplusplus"
-    / "weights"
-    / "best_model.pth"
-)
-
-UNETPLUSPLUS_RESULTS_DIR = (
-    PROJECT_ROOT
-    / "unetplusplus"
-    / "qualitative_results"
-)
-
 UNETPLUSPLUS_MODEL_PATH.parent.mkdir(
     parents=True,
     exist_ok=True,
@@ -288,3 +303,30 @@ UNETPLUSPLUS_RESULTS_DIR.mkdir(
     parents=True,
     exist_ok=True,
 )
+
+
+# ==========================================================
+# Required Input Validation
+# ==========================================================
+
+if not IMAGE_DIR.exists():
+    raise FileNotFoundError(
+        f"Image directory not found: {IMAGE_DIR}"
+    )
+
+if not MASK_DIR.exists():
+    raise FileNotFoundError(
+        f"Mask directory not found: {MASK_DIR}"
+    )
+
+if not TRAIN_LIST_PATH.exists():
+    raise FileNotFoundError(
+        f"Official training list not found: "
+        f"{TRAIN_LIST_PATH}"
+    )
+
+if not TEST_LIST_PATH.exists():
+    raise FileNotFoundError(
+        f"Official test list not found: "
+        f"{TEST_LIST_PATH}"
+    )
