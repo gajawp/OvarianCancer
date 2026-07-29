@@ -1,0 +1,2 @@
+model,input,accuracy,balanced_accuracy,macro_precision,macro_recall,macro_f1,weighted_f1,roc_auc_ovr_macro
+DS2Net + MTA-Swin,DS2Net predicted bounding-box ROI,0.7484008528784648,0.6749945249974523,0.6901321529023514,0.6749945249974523,0.6737154878629971,0.7470632752203875,0.899005323666545
