@@ -9,6 +9,8 @@ Usage:
   python nnunet_mmotu/evaluate_preds.py --preds preds --gt <raw>/Dataset501_MMOTU2d/test_gt
 """
 
+from __future__ import annotations  # allow "X | None" annotations on Python 3.9
+
 import argparse
 import csv
 from pathlib import Path
