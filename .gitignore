@@ -21,3 +21,9 @@ qualitative_results/
 
 # OS
 .DS_Store
+
+# nnU-Net generated data (regenerable / large)
+nnunet_mmotu/nnUNet_raw/
+nnunet_mmotu/nnUNet_preprocessed/
+nnunet_mmotu/nnUNet_results/
+nnunet_mmotu/preds/
