@@ -378,6 +378,21 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
+class BalancedSoftmaxLoss(nn.Module):
+    """Balanced Softmax / logit-adjusted CE for long-tailed data: shift logits by
+    the log class-prior at training time (raw logits are used at inference).
+    A principled imbalance remedy -- use instead of class weights / focal."""
+
+    def __init__(self, class_counts: np.ndarray):
+        super().__init__()
+        prior = np.asarray(class_counts, dtype=np.float64)
+        prior = np.maximum(prior, 1) / np.maximum(prior.sum(), 1)
+        self.register_buffer("log_prior", torch.tensor(np.log(prior), dtype=torch.float32))
+
+    def forward(self, logits, target):
+        return F.cross_entropy(logits + self.log_prior.to(logits.device), target)
+
+
 def read_cls_dataframe(cls_path: Path, image_dir: Path) -> pd.DataFrame:
     """Parse a MMOTU *_cls.txt file into a dataframe of (file_path, label, label_name)."""
     records: list[tuple[str, int, str]] = []
@@ -491,7 +506,7 @@ class EarlyStopping:
         self.best_value = value
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mixup_fn=None):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mixup_fn=None, ema=None):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -519,6 +534,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, scaler, mix
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        if ema is not None:
+            ema.update(model)  # EMA of weights, updated every step
         running_loss += loss.item() * images.size(0)
         total += labels.size(0)
         if mixup_fn is None:
@@ -563,14 +580,20 @@ def selection_score(y_true, y_pred, metric: str) -> float:
 
 
 @torch.no_grad()
-def evaluate_predictions(model, dataloader, device):
+def evaluate_predictions(model, dataloader, device, tta=False):
     model.eval()
     preds, labels_all, probs = [], [], []
     for images, labels in dataloader:
         images = images.to(device, non_blocking=True)
-        outputs = model(images)
-        probabilities = torch.softmax(outputs, dim=1)
-        preds.extend(outputs.argmax(dim=1).cpu().numpy())
+        if tta:
+            # Test-time augmentation: average softmax over flips (cheap, no interp).
+            views = [images, torch.flip(images, dims=[3]), torch.flip(images, dims=[2])]
+            probabilities = torch.stack(
+                [torch.softmax(model(v), dim=1) for v in views], dim=0
+            ).mean(dim=0)
+        else:
+            probabilities = torch.softmax(model(images), dim=1)
+        preds.extend(probabilities.argmax(dim=1).cpu().numpy())
         labels_all.extend(labels.numpy())
         probs.extend(probabilities.cpu().numpy())
     return (
@@ -712,15 +735,29 @@ def main():
     )
     parser.add_argument(
         "--loss",
-        choices=["ce", "focal"],
+        choices=["ce", "focal", "balanced_softmax"],
         default="ce",
-        help="Loss function: cross-entropy (default) or focal loss.",
+        help="Loss: cross-entropy (default), focal, or balanced_softmax (logit-adjusted "
+        "long-tail loss; handles imbalance on its own, ignored under --mixup).",
     )
     parser.add_argument(
         "--focal-gamma",
         type=float,
         default=None,
         help="Focal loss focusing parameter (default: config / 2.0). Only used with --loss focal.",
+    )
+    parser.add_argument(
+        "--ema",
+        action="store_true",
+        help="Track an exponential moving average of the weights and evaluate/save the EMA model.",
+    )
+    parser.add_argument(
+        "--ema-decay", type=float, default=0.9995, help="EMA decay (default 0.9995)."
+    )
+    parser.add_argument(
+        "--tta",
+        action="store_true",
+        help="Test-time augmentation: average softmax over horizontal/vertical flips at test.",
     )
     parser.add_argument(
         "--no-val",
@@ -811,6 +848,8 @@ def main():
     use_mixup = args.mixup
     pretrain = args.pretrain
     norm = args.norm
+    use_ema = args.ema
+    use_tta = args.tta
     if pretrain == "radimagenet" and args.model != "ResNet-50":
         parser.error("--pretrain radimagenet is only supported with --model ResNet-50")
 
@@ -837,8 +876,14 @@ def main():
         tag_parts.append("samp" if sampler_beta == 1.0 else f"samp{sampler_beta:g}")
     if loss_type == "focal":
         tag_parts.append(f"focal{focal_gamma:g}")
+    elif loss_type == "balanced_softmax":
+        tag_parts.append("bsm")
     if use_class_weights:
         tag_parts.append("cw")
+    if use_ema:
+        tag_parts.append("ema")
+    if use_tta:
+        tag_parts.append("tta")
     tag_parts.append(f"s{seed}")
     run_tag = "_".join(tag_parts)
     model_display = f"{args.model} ({mode_tag})"
@@ -852,8 +897,11 @@ def main():
     if args.model == "MTA-Swin" and args.mode == "pretrained":
         print(f"Pretrained wts:   {config.pretrained_weights_path}")
     print(f"Seed:             {seed}")
-    print(f"Loss:             {'focal (gamma=%g)' % focal_gamma if loss_type == 'focal' else 'cross-entropy'}")
+    loss_display = {"focal": "focal (gamma=%g)" % focal_gamma, "balanced_softmax": "balanced-softmax (logit-adjusted)"}.get(loss_type, "cross-entropy")
+    print(f"Loss:             {loss_display}")
     print(f"Class weights:    {use_class_weights}")
+    print(f"EMA:              {use_ema}" + (f" (decay={args.ema_decay:g})" if use_ema else ""))
+    print(f"TTA (test):       {use_tta}")
     print(f"Sampler:          {sampler_type}" + (f" (beta={sampler_beta:g})" if sampler_type != "none" else ""))
     print(f"ROI:              {roi_mode}" + (f" (masks: {config.mask_dir})" if roi_mode != "none" else ""))
     print(f"Augmentation:     {aug}")
@@ -940,6 +988,12 @@ def main():
 
     if loss_type == "focal":
         criterion = FocalLoss(gamma=focal_gamma, weight=class_weight_tensor)
+    elif loss_type == "balanced_softmax":
+        bsm_counts = (
+            train_df["label"].value_counts().reindex(range(config.num_classes), fill_value=0).sort_index().to_numpy()
+        )
+        criterion = BalancedSoftmaxLoss(bsm_counts).to(device)
+        print("Balanced-softmax log-prior from train counts:", bsm_counts.tolist())
     else:
         criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=config.label_smoothing)
 
@@ -974,6 +1028,13 @@ def main():
         )
     scaler = create_grad_scaler(device)
 
+    ema = None
+    if use_ema:
+        from timm.utils import ModelEmaV2
+
+        ema = ModelEmaV2(model, decay=args.ema_decay)
+        print(f"EMA enabled (decay={args.ema_decay:g}); val/test use the EMA weights.")
+
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = config.checkpoint_dir / f"best_{run_tag}.pt"
     early_stopping = None if no_val else EarlyStopping(config.early_stopping_patience, checkpoint_path, verbose=True)
@@ -984,8 +1045,9 @@ def main():
     for epoch in range(num_epochs):
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, train_criterion, optimizer, device, scaler, mixup_fn=mixup_fn
+            model, train_loader, train_criterion, optimizer, device, scaler, mixup_fn=mixup_fn, ema=ema
         )
+        eval_model = ema.module if ema is not None else model  # EMA weights for val/test
         train_losses.append(train_loss)
         train_accs.append(train_acc)
         # train_acc is nan by design under --mixup (soft targets); show n/a, not "nan".
@@ -1000,7 +1062,7 @@ def main():
             )
             continue
 
-        val_loss, val_acc, val_true, val_pred = validate(model, val_loader, criterion, device)
+        val_loss, val_acc, val_true, val_pred = validate(eval_model, val_loader, criterion, device)
         val_macro_f1 = float(precision_recall_fscore_support(val_true, val_pred, average="macro", zero_division=0)[2])
         val_score = selection_score(val_true, val_pred, selection_metric)
         scheduler.step(val_score)
@@ -1016,21 +1078,22 @@ def main():
             f"[{selection_metric}] {val_score:.4f} best {early_stopping.best_value:.4f}"
         )
 
-        early_stopping(val_score, model)
+        early_stopping(val_score, eval_model)
         if early_stopping.should_stop:
             print(f"Early stopping at epoch {epoch + 1} (best {selection_metric} {early_stopping.best_value:.4f})")
             break
 
     # ---- select model + evaluate on held-out test (val_cls.txt) ----
     if no_val:
-        torch.save(model.state_dict(), checkpoint_path)
-        print(f"\nNo-val mode: using final model after {num_epochs} epochs; evaluating on test (val_cls.txt)")
+        torch.save((ema.module if ema is not None else model).state_dict(), checkpoint_path)
+        print(f"\nNo-val mode: using final {'EMA ' if ema else ''}model after {num_epochs} epochs; evaluating on test (val_cls.txt)")
     else:
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         print("\nRestored best checkpoint; evaluating on held-out test set (val_cls.txt)")
+    # Load the selected weights (best/EMA) back into `model` for the final eval.
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     test_loss, test_acc, _, _ = validate(model, test_loader, criterion, device)
-    predictions, true_labels, probabilities = evaluate_predictions(model, test_loader, device)
+    predictions, true_labels, probabilities = evaluate_predictions(model, test_loader, device, tta=use_tta)
     cm, metrics_df, summary = build_per_class_metrics_table(true_labels, predictions, list(CLASS_NAMES))
 
     bal_acc = balanced_accuracy_score(true_labels, predictions)
@@ -1066,7 +1129,7 @@ def main():
     summary_row = {
         "Model": model_display,
         "Seed": seed,
-        "Loss": f"focal(g={focal_gamma:g})" if loss_type == "focal" else "ce",
+        "Loss": {"focal": f"focal(g={focal_gamma:g})", "balanced_softmax": "balanced_softmax"}.get(loss_type, "ce"),
         "Selection Metric": "-" if no_val else selection_metric,
         "Val Split": 0.0 if no_val else round(val_split, 3),
         "No Val": no_val,
@@ -1075,6 +1138,8 @@ def main():
         "Aug": aug,
         "Norm": norm,
         "MixUp": use_mixup,
+        "EMA": use_ema,
+        "TTA": use_tta,
         "Class Weights": use_class_weights,
         "Accuracy (%)": round(summary["accuracy"] * 100, 3),
         "Balanced Accuracy (%)": round(bal_acc * 100, 3),

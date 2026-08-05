@@ -181,6 +181,24 @@ python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --mixup
 Note: under `--mixup`, per-epoch train accuracy is reported as `nan` (targets are
 soft); judge by val/test metrics as usual.
 
+### More boosters (EMA / TTA / balanced-softmax loss)
+
+```bash
+# EMA (exponential moving average of weights; val/test use the EMA model)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced --aug strong --mixup --ema
+
+# TTA (test-time augmentation: average softmax over h/v flips at test only)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --sampler balanced --aug strong --mixup --tta
+
+# balanced-softmax (logit-adjusted long-tail loss; handles imbalance itself, so
+# use WITHOUT --sampler/--mixup/--class-weights; ignored under --mixup)
+python experiments/mmotu_cls/run_mmotu_mta_swin.py --no-val --epochs 100 --aug strong --loss balanced_softmax
+```
+
+`bash experiments/mmotu_cls/run_boost.sh` runs a focused sweep of the above
+(EMA / TTA / balanced-softmax / 200-epoch) on top of the best recipe, seed 42.
+Tags encode `_ema`, `_tta`, `_bsm`.
+
 `--roi` needs the masks in `OTU_2d/annotations/<id>_binary.PNG` (override dir via
 `MMOTU_MASK_DIR`). Images with a missing/empty mask fall back to the full image.
 Tags look like `MTA-Swin_pretrained_noval_e100_roicrop_augstrong_samp_s42`.
