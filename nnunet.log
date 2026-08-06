@@ -1,0 +1,6 @@
+nohup: ignoring input
+############## 1/5 convert MMOTU -> nnU-Net (official split) ##############
+Traceback (most recent call last):
+  File "/home/zhang.yu22/OvarianCancer/nnunet_mmotu/convert_to_nnunet.py", line 38, in <module>
+    def find_file(directory: Path, stem: str, suffixes) -> Path | None:
+TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
