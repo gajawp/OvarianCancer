@@ -44,8 +44,16 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate nnU-Net preds vs MMOTU GT (official test).")
     parser.add_argument("--preds", type=Path, required=True, help="nnUNetv2_predict output dir (<id>.png)")
     parser.add_argument("--gt", type=Path, required=True, help="test_gt dir (<id>.png)")
-    parser.add_argument("--out-csv", type=Path, default=Path("nnunet_mmotu/nnunet_test_metrics.csv"))
+    parser.add_argument("--out-csv", type=Path, default=None,
+                        help="output CSV (default nnunet_test_metrics[_<eval-size>].csv)")
+    parser.add_argument("--eval-size", type=int, default=None,
+                        help="if set, resize BOTH pred and GT to this square size (nearest) "
+                             "before scoring, e.g. 256 to match a 256x256-trained baseline")
     args = parser.parse_args()
+
+    if args.out_csv is None:
+        suffix = "" if args.eval_size is None else f"_{args.eval_size}"
+        args.out_csv = Path(f"nnunet_mmotu/nnunet_test_metrics{suffix}.csv")
 
     gt_files = sorted(args.gt.glob("*.png"))
     if not gt_files:
@@ -58,7 +66,13 @@ def main():
         if not pred_path.exists():
             missing += 1
             continue
-        d, i, b, m = per_image_metrics(load_binary(pred_path), load_binary(gt_path))
+        pred_m = load_binary(pred_path)
+        gt_m = load_binary(gt_path)
+        if args.eval_size is not None:
+            sz = (args.eval_size, args.eval_size)
+            pred_m = cv2.resize(pred_m, sz, interpolation=cv2.INTER_NEAREST)
+            gt_m = cv2.resize(gt_m, sz, interpolation=cv2.INTER_NEAREST)
+        d, i, b, m = per_image_metrics(pred_m, gt_m)
         rows.append((gt_path.stem, d, i, b, m))
         fgd.append(d); fgi.append(i); bgi.append(b); mi.append(m)
 
@@ -69,7 +83,8 @@ def main():
         w.writerows(rows)
 
     n = len(rows)
-    print(f"Evaluated {n} images (missing preds: {missing})")
+    res_note = "original GT resolution" if args.eval_size is None else f"{args.eval_size}x{args.eval_size} (matched)"
+    print(f"Evaluated {n} images (missing preds: {missing})  |  eval res: {res_note}")
     print("-" * 44)
     print(f"Foreground Dice : {np.mean(fgd):.4f}")
     print(f"Foreground IoU  : {np.mean(fgi):.4f}")
