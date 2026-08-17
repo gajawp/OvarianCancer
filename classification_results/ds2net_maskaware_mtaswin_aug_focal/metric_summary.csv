@@ -1,0 +1,2 @@
+model,input,accuracy,balanced_accuracy,macro_precision,macro_recall,macro_f1,weighted_f1,roc_auc_ovr_macro
+DS2Net + Mask-Aware MTA-Swin + Augmentation,RGB ROI plus explicit mask,0.7526652452025586,0.7063630013914688,0.6961470888402801,0.7063630013914688,0.6956346932937474,0.7562619147890401,0.9256134566655672

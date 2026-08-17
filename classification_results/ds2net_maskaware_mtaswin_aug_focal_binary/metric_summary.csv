@@ -1,0 +1,2 @@
+model,task,selected_threshold,accuracy,balanced_accuracy,malignant_precision,sensitivity,specificity,malignant_f1,macro_f1,negative_predictive_value,roc_auc,pr_auc,true_negatives,false_positives,false_negatives,true_positives
+DS2Net + Mask-Aware MTA-Swin + Augmentation + Focal Loss,High-grade serous carcinoma vs non-malignant/other,0.5,0.9786780383795309,0.7633627019089574,0.7272727272727273,0.5333333333333333,0.9933920704845814,0.6153846153846154,0.8022098515519569,0.9847161572052402,0.8580029368575625,0.5159950848746971,451,3,7,8

@@ -1,0 +1,8 @@
+image_name,mask_name,original_multiclass_label,true_binary_label,true_class_name,probability_non_malignant,probability_malignant,selected_threshold,predicted_binary_label,predicted_class_name,confidence,correct
+1458.JPG,1458_mask.png,7,1,High-grade serous carcinoma,0.9970490336418152,0.00295096542686224,0.5,0,Non-malignant / other,0.9970490345731378,0
+1454.JPG,1454_mask.png,7,1,High-grade serous carcinoma,0.9734408259391785,0.026559198275208473,0.5,0,Non-malignant / other,0.9734408017247915,0
+1461.JPG,1461_mask.png,7,1,High-grade serous carcinoma,0.991917073726654,0.008082972839474678,0.5,0,Non-malignant / other,0.9919170271605253,0
+1469.JPG,1469_mask.png,7,1,High-grade serous carcinoma,0.9932013154029846,0.006798693910241127,0.5,0,Non-malignant / other,0.9932013060897589,0
+1435.JPG,1435_mask.png,7,1,High-grade serous carcinoma,0.993697464466095,0.00630253367125988,0.5,0,Non-malignant / other,0.9936974663287401,0
+1468.JPG,1468_mask.png,7,1,High-grade serous carcinoma,0.9908838868141174,0.00911607127636671,0.5,0,Non-malignant / other,0.9908839287236333,0
+1460.JPG,1460_mask.png,7,1,High-grade serous carcinoma,0.9959839582443237,0.0040160915814340115,0.5,0,Non-malignant / other,0.995983908418566,0

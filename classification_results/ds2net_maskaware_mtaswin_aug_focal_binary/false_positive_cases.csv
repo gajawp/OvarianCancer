@@ -1,0 +1,4 @@
+image_name,mask_name,original_multiclass_label,true_binary_label,true_class_name,probability_non_malignant,probability_malignant,selected_threshold,predicted_binary_label,predicted_class_name,confidence,correct
+632.JPG,632_mask.png,5,0,Non-malignant / other,0.24144528806209564,0.7585547566413879,0.5,1,High-grade serous carcinoma,0.7585547566413879,0
+1340.JPG,1340_mask.png,5,0,Non-malignant / other,0.4526328444480896,0.5473672151565552,0.5,1,High-grade serous carcinoma,0.5473672151565552,0
+1133.JPG,1133_mask.png,3,0,Non-malignant / other,0.004514590371400118,0.9954853653907776,0.5,1,High-grade serous carcinoma,0.9954853653907776,0
