@@ -1,0 +1,2 @@
+model,input_size,accuracy,balanced_accuracy,malignant_precision,sensitivity,specificity,malignant_f1,macro_f1,negative_predictive_value,roc_auc,pr_auc,true_negatives,false_positives,false_negatives,true_positives
+DS2Net + ROI Swin-T + Full-image ResNet18 + Mask Encoder,224,0.9658848614072495,0.6922907488986785,0.46153846153846156,0.4,0.9845814977973568,0.42857142857142855,0.7054945054945054,0.9802631578947368,0.841409691629956,0.4002770465345896,447,7,9,6
